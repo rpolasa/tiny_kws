@@ -1,0 +1,1055 @@
+<title>tiny_kws Bench</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* layout: instrument bench — one status strip, then a 12-column grid of panels (scope, logits, detector, tests) */
+:root {
+  --bg: #eef2ef; --surface: #ffffff; --ink: #18211f; --muted: #5b6965; --line: #d3dbd7;
+  --accent: #0d6c8a; --accent-soft: #d7ebf1; --hot: #c8460c; --hot-soft: #fbe3d6;
+  --good: #1f7a45; --warn: #9a6a00; --bad: #b3261e;
+  --spec0: #eef2ef; --spec1: #0d6c8a; --spec2: #f0a020;
+  --font: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111816; --surface: #19211f; --ink: #e2e9e5; --muted: #95a39e; --line: #2a3532;
+  --accent: #4fb2d0; --accent-soft: #163541; --hot: #ff8a4c; --hot-soft: #3d2216;
+  --good: #5ccc8a; --warn: #e2b23c; --bad: #ff7b72;
+  --spec0: #111816; --spec1: #2f8fb0; --spec2: #ffc04d; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #111816; --surface: #19211f; --ink: #e2e9e5; --muted: #95a39e; --line: #2a3532;
+  --accent: #4fb2d0; --accent-soft: #163541; --hot: #ff8a4c; --hot-soft: #3d2216;
+  --good: #5ccc8a; --warn: #e2b23c; --bad: #ff7b72;
+  --spec0: #111816; --spec1: #2f8fb0; --spec2: #ffc04d; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font-family: var(--font); font-size: 14px; line-height: 1.45; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 20px 40px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 16px; }
+h1 { font-size: 20px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h2 { font-size: 12px; margin: 0; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.mono, code, .num { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.strip { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.strip .grow { flex: 1 1 260px; min-width: 0; }
+.spec-line { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--line); background: var(--surface); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill.live .dot { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+button, select, input[type=number] { font: inherit; color: var(--ink); }
+button { border: 1px solid var(--line); background: var(--surface); padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 500; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .5; cursor: default; }
+.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.c12 { grid-column: span 12 } .c8 { grid-column: span 8 } .c4 { grid-column: span 4 } .c7 { grid-column: span 7 } .c5 { grid-column: span 5 }
+@media (max-width: 900px) { .c8, .c4, .c7, .c5 { grid-column: span 12 } }
+.det { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center; }
+.led { width: 46px; height: 46px; border-radius: 50%; border: 2px solid var(--line); background: var(--bg); transition: background .15s; }
+.led.on { background: var(--hot); border-color: var(--hot); box-shadow: 0 0 18px var(--hot); }
+.det-word { font-size: 34px; font-weight: 600; letter-spacing: -0.02em; min-height: 46px; }
+.det-word.fresh { color: var(--hot); }
+canvas { width: 100%; display: block; border-radius: 6px; }
+.meter { height: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; position: relative; overflow: hidden; }
+.meter .band { position: absolute; top: 0; bottom: 0; background: var(--accent-soft); }
+.meter .bar { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent); width: 0; transition: width .08s; }
+.meter .pk { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--hot); left: 0; }
+.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; }
+.ctl { display: flex; flex-direction: column; gap: 4px; }
+.ctl label { font-size: 12px; color: var(--muted); }
+.ctl .row { display: flex; gap: 8px; align-items: center; }
+input[type=range] { flex: 1; accent-color: var(--accent); min-width: 0; }
+.regs { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.reg { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.reg .k { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.reg .v { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 12px; color: var(--muted); }
+.tabs button[aria-selected=true] { color: var(--ink); border-bottom-color: var(--accent); }
+.prompt { font-size: 44px; font-weight: 600; text-align: center; padding: 18px 0 6px; letter-spacing: -0.02em; }
+.prompt.ready { color: var(--muted); }
+.prompt.speak { color: var(--accent); }
+.progress { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--accent); width: 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.tile .v { font-size: 26px; font-weight: 600; font-family: var(--mono); }
+.tile .k { font-size: 12px; color: var(--muted); }
+.tbl-wrap { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+th, td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; }
+td.num, th.num { text-align: right; font-family: var(--mono); }
+.ok { color: var(--good); font-weight: 600 } .badc { color: var(--bad); font-weight: 600 } .warnc { color: var(--warn); font-weight: 600 }
+.cm td.hit { background: color-mix(in srgb, var(--good) 22%, transparent); }
+.cm td.err { background: color-mix(in srgb, var(--bad) 18%, transparent); }
+.log { font-family: var(--mono); font-size: 12.5px; max-height: 260px; overflow-y: auto; }
+.log div { padding: 3px 0; border-bottom: 1px dashed var(--line); }
+.note { font-size: 12.5px; color: var(--muted); max-width: 75ch; }
+.xp-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .xp-grid { grid-template-columns: minmax(0, 1fr); } }
+.xp-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.xp-big { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; min-height: 40px; }
+.xp-heard { font-family: var(--mono); font-size: 13px; color: var(--muted); min-height: 20px; }
+.silicon { border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px; font-size: 12.5px; color: var(--muted); }
+.silicon b { color: var(--ink); font-weight: 600; }
+.lockdots { display: flex; gap: 10px; flex-wrap: wrap; }
+.lockdots div { min-width: 64px; padding: 8px 10px; border: 2px solid var(--line); border-radius: 10px; text-align: center; font-family: var(--mono); font-weight: 600; }
+.lockdots div.done { border-color: var(--good); color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); }
+.lockdots div.next { border-color: var(--accent); }
+.lockstate { font-size: 34px; font-weight: 600; letter-spacing: -0.02em; }
+.lockstate.open { color: var(--good); } .lockstate.shut { color: var(--muted); } .lockstate.bad { color: var(--bad); }
+.kbd { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.kbd div { border: 1px solid var(--line); border-radius: 8px; padding: 10px 0; text-align: center; font-family: var(--mono); font-size: 18px; font-weight: 600; }
+.kbd div.cur { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.typed { font-family: var(--mono); font-size: 22px; min-height: 44px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; word-break: break-word; }
+.typed .caret { display: inline-block; width: 2px; height: 1.1em; background: var(--accent); vertical-align: text-bottom; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0 } }
+.chip-msgs { display: flex; flex-direction: column; gap: 6px; }
+.msg { border-left: 3px solid var(--line); padding: 4px 10px; font-size: 12.5px; }
+.msg.e { border-color: var(--bad); color: var(--bad); } .msg.w { border-color: var(--warn); }
+pre.code { font-family: var(--mono); font-size: 12px; line-height: 1.5; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; margin: 0; overflow-x: auto; white-space: pre; }
+.ctl input[type=text].hex, .ctl input[type=number] { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-family: var(--mono); min-width: 0; width: 100%; }
+.err-box { border: 1px solid var(--bad); color: var(--bad); border-radius: 8px; padding: 10px 12px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important } }
+</style>
+
+<div class="wrap">
+  <header class="strip">
+    <div class="grow">
+      <h1>tiny_kws Bench</h1>
+      <div class="spec-line" id="specLine">loading model…</div>
+    </div>
+    <span class="pill" id="micPill"><span class="dot"></span><span id="micState">Mic off</span></span>
+    <button class="primary" id="btnMic">Start microphone</button>
+    <button id="btnClear" title="CTRL.CLEAR: zero the hidden state and front-end state">Clear state</button>
+  </header>
+  <div id="errBox" class="err-box" hidden></div>
+
+  <section class="grid">
+    <div class="panel c4">
+      <h2>Detector · DETECT pin</h2>
+      <div class="det">
+        <div class="led" id="led"></div>
+        <div><div class="det-word" id="detWord">—</div><div class="muted num" id="detMeta">no detection yet</div></div>
+      </div>
+      <h2>Input level</h2>
+      <div class="meter" title="shaded band: speech level range of the training data"><div class="band" id="meterBand"></div><div class="bar" id="meterBar"></div><div class="pk" id="meterPk"></div></div>
+      <div class="muted num" id="levelText">peak — dBFS · aim speech peaks into the shaded band (−25 … −9 dBFS)</div>
+    </div>
+    <div class="panel c8">
+      <h2>Front end · 16 log-energy bands, last 4 s (32 ms frames)</h2>
+      <canvas id="spec" height="128"></canvas>
+      <div class="muted" style="font-size:12px">band 0 (213 Hz) at the bottom … band 15 (5.9 kHz) at the top · 0.75 dB per code</div>
+    </div>
+
+    <div class="panel c7">
+      <h2>Classifier · int8 logits this frame</h2>
+      <canvas id="bars" height="230"></canvas>
+    </div>
+    <div class="panel c5">
+      <h2>Settings</h2>
+      <div class="controls">
+        <div class="ctl"><label for="gain">Digital gain</label><div class="row"><input type="range" id="gain" min="-12" max="30" step="1" value="0"><span class="num" id="gainV">0 dB</span></div></div>
+        <div class="ctl"><label for="thr">THR (margin)</label><div class="row"><input type="range" id="thr" min="0" max="48" step="1" value="12"><span class="num" id="thrV">12</span></div></div>
+        <div class="ctl"><label for="nfr">N (frames)</label><div class="row"><input type="range" id="nfr" min="1" max="8" step="1" value="4"><span class="num" id="nfrV">4</span></div></div>
+        <div class="ctl"><label for="path">Audio path</label>
+          <select id="path"><option value="pcm">PCM (host SPI mode)</option><option value="pdm">PDM mic + CIC3 (emulated)</option></select></div>
+        <div class="ctl"><label for="agc">Browser processing</label>
+          <select id="agc"><option value="off">Off (raw mic)</option><option value="agc">Auto gain on</option></select></div>
+        <div class="ctl"><label for="modelFile">Model blob (.bin)</label><input type="file" id="modelFile" accept=".bin,application/octet-stream"></div>
+        <div class="ctl" style="grid-column:1/-1"><label for="names">Class names (index order, comma separated)</label>
+          <div class="row"><input type="text" id="names" class="mono" style="flex:1;min-width:0;font-size:12px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)"><button id="btnNames">Apply</button></div></div>
+      </div>
+      <h2>Chip registers</h2>
+      <div class="regs">
+        <div class="reg"><div class="k">0x21 RESULT</div><div class="v" id="rRes">00</div></div>
+        <div class="reg"><div class="k">0x22 TOP1</div><div class="v" id="rT1">0</div></div>
+        <div class="reg"><div class="k">0x23 TOP2</div><div class="v" id="rT2">0</div></div>
+        <div class="reg"><div class="k">0x24 FRAMES</div><div class="v" id="rFr">0</div></div>
+      </div>
+      <div class="muted num" id="perf" style="font-size:12px">—</div>
+    </div>
+
+    <div class="panel c12">
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="test" id="tabTest">Guided test</button>
+        <button role="tab" aria-selected="false" data-tab="log" id="tabLog">Detection log</button>
+        <button role="tab" aria-selected="false" data-tab="self" id="tabSelf">Bit-exact self-test</button>
+        <button role="tab" aria-selected="false" data-tab="wav" id="tabWav">WAV file</button>
+        <button role="tab" aria-selected="false" data-tab="make" id="tabMake">Create model</button>
+        <button role="tab" aria-selected="false" data-tab="chip" id="tabChip">Chip setup</button>
+      </div>
+
+      <div data-pane="test">
+        <div class="strip">
+          <div class="grow note">Say each prompted word once while it is highlighted. Silence and "any other word" prompts measure false accepts.
+            Scoring uses the on-chip detector (THR, N) plus a threshold-free best-frame classification.</div>
+          <label class="muted" for="rounds">Rounds</label>
+          <select id="rounds"><option value="1">12 prompts</option><option value="2" selected>24 prompts</option><option value="4">48 prompts</option></select>
+          <button class="primary" id="btnTest">Start test</button>
+        </div>
+        <div class="prompt ready" id="prompt">Press Start test</div>
+        <div class="progress"><div id="prog"></div></div>
+        <div class="muted num" id="testStatus" style="text-align:center;margin-top:6px">microphone must be running</div>
+        <div id="results"></div>
+      </div>
+
+      <div data-pane="log" hidden>
+        <div class="strip"><div class="grow muted num" id="logStats">listening time 0 s · 0 detections</div><button id="btnLogClear">Clear log</button></div>
+        <div class="log" id="log"></div>
+      </div>
+
+      <div data-pane="self" hidden>
+        <div class="strip"><div class="grow note">Runs 12 clips from the official Speech Commands test set through this page's model and compares every
+          frame's 16 features and top-1/top-2 logits with the golden model used for RTL and gate-level sign-off.</div>
+          <button class="primary" id="btnSelf">Run self-test</button></div>
+        <div id="selfOut"></div>
+      </div>
+
+      <div data-pane="make" hidden>
+        <p class="note">Builds a new chip model from your recordings. The trained 16-band front end and 48-unit GRU stay as they are; only the
+          classifier layer is retrained on GRU states captured live from your microphone (plus stored Speech Commands states), then quantised
+          to the chip's int8/24-bit format and written as a model blob. Classes 0 and 1 are always silence and unknown (NFILL = 2). The chip allows up to 16 classes.</p>
+        <div class="strip">
+          <label><input type="checkbox" id="mkBuiltin" checked> Keep the 10 built-in keywords</label>
+          <div class="row" style="display:flex;gap:8px;flex:1 1 260px;min-width:0">
+            <input type="text" id="mkWord" placeholder="new keyword, e.g. lights" style="flex:1;min-width:0;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)">
+            <button id="mkAdd">Add keyword</button></div>
+          <label class="muted" for="mkTakes">Takes</label>
+          <select id="mkTakes"><option>5</option><option selected>10</option><option>15</option><option>20</option></select>
+        </div>
+        <div class="tbl-wrap"><table id="mkTable"></table></div>
+        <div class="prompt ready" id="mkPrompt">Add a keyword, then record</div>
+        <div class="progress"><div id="mkProg"></div></div>
+        <div class="muted num" id="mkStatus" style="text-align:center;margin-top:6px">microphone must be running</div>
+        <div class="strip" style="margin-top:10px">
+          <button class="primary" id="mkTrain">Train model</button>
+          <button id="mkUse" disabled>Load into the bench</button>
+          <button id="mkBin" disabled>Download model.bin</button>
+          <button id="mkHex" disabled>Download model.hex</button>
+          <button id="mkJson" disabled>Download classes.json</button>
+          <button id="mkReset">Delete my recordings</button>
+        </div>
+        <div id="mkOut"></div>
+      </div>
+
+
+      <div data-pane="chip" hidden>
+        <p class="note">Register settings for running the tt_um_rakesh_tiny_kws silicon at your clock. Load the model with CTRL.RUN = 0
+          (the QSPI bus is released), write the registers below in order, CTRL last. CTRL always carries HOP512 (the model uses 32 ms frames;
+          the reset value is the 16 ms hop) and CLEAR: write CLEAR whenever RUN is set again, because RUN cleared in mid-frame leaves the
+          network engine waiting until CLEAR. BURST has to follow the clock so PSRAM chip-select stays under 8 µs.</p>
+        <div class="controls">
+          <div class="ctl"><label for="cRev">Chip</label><select id="cRev"><option value="B">rev B · 4x2 tiles</option><option value="A">rev A · 6x2 tiles</option></select></div>
+          <div class="ctl"><label for="cPreset">Clock</label><select id="cPreset"><option value="50">50 MHz · TT default</option><option value="40">40 MHz</option><option value="25">25 MHz</option><option value="16.384">16.384 MHz · FPGA kit</option><option value="x">Custom…</option></select></div>
+          <div class="ctl"><label for="cMhz">f_clk (MHz)</label><input type="number" id="cMhz" min="1" max="100" step="0.001" value="50"></div>
+          <div class="ctl"><label for="cSrc">Audio input</label><select id="cSrc"><option value="pdm">PDM microphone</option><option value="pcm">PCM from host (SPI)</option><option value="feat">Features from host</option></select></div>
+          <div class="ctl"><label for="cMem">Model memory</label><select id="cMem"><option value="ramA">PSRAM A · CS1</option><option value="ramB">PSRAM B · CS2</option><option value="flash">Flash · CS0</option></select></div>
+          <div class="ctl"><label for="cBase">Model base (hex)</label><input type="text" id="cBase" class="hex" value="000000" spellcheck="false"></div>
+          <div class="ctl"><label for="cDiv">SCK divider</label><select id="cDiv"><option value="0">auto</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></div>
+          <div class="ctl"><label for="cRd">Read capture delay</label><select id="cRd"><option value="-1">auto</option><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></div>
+          <div class="ctl"><label for="cEdge">PDM capture edge</label><select id="cEdge"><option value="0">default</option><option value="1">other edge (PDM_EDGE)</option></select></div>
+        </div>
+        <div class="chip-msgs" id="chipMsgs"></div>
+        <div class="tiles" id="chipTiles"></div>
+        <div class="tbl-wrap"><table id="chipRegs"></table></div>
+        <div class="strip"><div class="grow muted" id="chipNote" style="font-size:12px"></div>
+          <button id="chipCopyPy">Copy Python</button><button id="chipCopySpi">Copy SPI frames</button></div>
+        <pre class="code" id="chipCode"></pre>
+      </div>
+      <div data-pane="wav" hidden>
+        <div class="strip"><div class="grow note">Analyse a recording (any rate; resampled to 16 kHz). The state is not reset between words, as on the chip.</div>
+          <input type="file" id="wavFile" accept="audio/*"></div>
+        <div id="wavOut"></div>
+      </div>
+    </div>
+
+    <div class="panel c12" id="xpPanel">
+      <h2>Experiences · what the silicon can do with a 4-bit answer</h2>
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="xmaze" id="xTabMaze">Voice maze</button>
+        <button role="tab" aria-selected="false" data-tab="xlock" id="xTabLock">Spoken lock</button>
+        <button role="tab" aria-selected="false" data-tab="xspell" id="xTabSpell">Hands-free speller</button>
+        <button role="tab" aria-selected="false" data-tab="xinside" id="xTabInside">Inside the chip</button>
+      </div>
+
+      <div data-pane="xmaze">
+        <div class="xp-grid">
+          <canvas id="mzCv" height="300" aria-label="maze"></canvas>
+          <div class="xp-side">
+            <div class="xp-big" id="mzStatus">Say a direction</div>
+            <div class="xp-heard" id="mzHeard">—</div>
+            <div class="tiles"><div class="tile"><div class="v" id="mzTime">0.0 s</div><div class="k">time</div></div>
+              <div class="tile"><div class="v" id="mzCmds">0</div><div class="k">commands</div></div>
+              <div class="tile"><div class="v" id="mzBumps">0</div><div class="k">bumps into walls</div></div></div>
+            <p class="note"><b>up · down · left · right</b> run along the corridor to the next junction. <b>go</b> repeats the last direction,
+              <b>no</b> takes the last move back. Reach the orange square.</p>
+            <div class="strip"><label class="muted" for="mzSize">Maze</label>
+              <select id="mzSize"><option value="7,5">small</option><option value="11,7" selected>medium</option><option value="15,9">large</option></select>
+              <button id="mzNew">New maze</button></div>
+            <div class="silicon"><b>On the silicon:</b> wire DETECT (uo[2]) and DET_CLASS (uo[7:4]) to any microcontroller — the RP2350 on the
+              Tiny Tapeout demo board will do. Read the class on each DETECT rising edge and move the player; the game never sees audio,
+              only a 4-bit number per command.</div>
+          </div>
+        </div>
+      </div>
+
+      <div data-pane="xlock" hidden>
+        <div class="xp-grid">
+          <div class="xp-side">
+            <div class="lockstate shut" id="lkState">LOCKED</div>
+            <div class="lockdots" id="lkDots"></div>
+            <div class="xp-heard" id="lkHeard">—</div>
+            <div class="progress"><div id="lkTimer"></div></div>
+            <div class="muted num" id="lkStats" style="font-size:12px">0 openings · 0 wrong words</div>
+          </div>
+          <div class="xp-side">
+            <div class="ctl"><label>Secret sequence (4 words)</label><div class="row" id="lkPick" style="display:flex;gap:6px;flex-wrap:wrap"></div></div>
+            <div class="strip"><button id="lkHide">Hide the code</button><button id="lkReset">Lock again</button></div>
+            <p class="note">Say the words in order, each within 5 s of the last. A wrong word starts over; three wrong words in a row lock the
+              door for 10 s. This is a convenience lock, not security: the chip recognises words, not voices.</p>
+            <div class="silicon"><b>On the silicon:</b> the sequence check is a few flip-flops on the DET_CLASS nibble, clocked by the DETECT edge —
+              a CPLD, a small FPGA or a few lines of MicroPython. The microphone, filter bank and network stay inside the chip; only the class of
+              each detected word leaves it.</div>
+          </div>
+        </div>
+      </div>
+
+      <div data-pane="xspell" hidden>
+        <div class="xp-grid">
+          <div class="xp-side">
+            <div class="typed" id="spText"><span class="caret"></span></div>
+            <div class="kbd" id="spKbd"></div>
+          </div>
+          <div class="xp-side">
+            <div class="xp-heard" id="spHeard">—</div>
+            <div class="tiles"><div class="tile"><div class="v" id="spCpm">—</div><div class="k">characters per minute</div></div>
+              <div class="tile"><div class="v" id="spCmds">0</div><div class="k">commands</div></div></div>
+            <p class="note">Type without hands. <b>up · down · left · right</b> move the cursor, <b>yes</b> or <b>go</b> types the letter,
+              <b>no</b> deletes, <b>stop</b> twice clears. Ten words are enough to write anything.</p>
+            <button id="spClear">Clear text</button>
+            <div class="silicon"><b>On the silicon:</b> this is the switch-scanning pattern used for assistive communication — a keyword chip at a few
+              milliwatts with an always-on PDM microphone, no network connection and no audio leaving the device. DET_CLASS drives the
+              cursor; the text lives on the host.</div>
+          </div>
+        </div>
+      </div>
+
+      <div data-pane="xinside" hidden>
+        <p class="note">The 48 hidden units of the GRU as they change every 32 ms frame (blue negative, orange positive), and the chip's output pins
+          as your logic analyser will show them. Speak, and watch a word become a trajectory, then a 4-bit answer.</p>
+        <canvas id="inH" height="192" aria-label="hidden state"></canvas>
+        <canvas id="inLA" height="118" aria-label="output pins"></canvas>
+        <div class="tiles" id="inTiles"></div>
+        <div class="silicon"><b>On the silicon:</b> FRAME (uo[3]) toggles once per processed frame, DETECT (uo[2]) is high for the frame a keyword is
+          detected and DET_CLASS (uo[7:4]) holds the class of the last detection. Probe them with a logic analyser to compare with this view;
+          the hidden state is internal and only visible here.</div>
+      </div>
+    </div>
+  </section>
+  <p class="note">This page runs the bit-exact software model of the tt_um_rakesh_tiny_kws chip: the same integer filterbank, GRU, detector and model blob
+    as the silicon (rev B, 4x2 tiles; rev A, 6x2, computes identical results). Live audio needs microphone permission; open this file in Chrome or Edge. If the browser refuses the microphone on a file:// page,
+    serve the folder with <code>python -m http.server</code> and open <code>http://localhost:8000/app/kws_live.html</code>.</p>
+</div>
+
+<script>/*KWS_MODEL_JS*/</script>
+<script type="text/plain" id="modelSrc">/*KWS_MODEL_JS*/</script>
+<script>
+"use strict";
+const GOLD = /*GOLDEN_JSON*/null;
+const $ = id => document.getElementById(id);
+let CL = GOLD.classes.slice(), KW = CL.slice(2);
+const EMB = /*EMBED_JSON*/null;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+// ---------------------------------------------------------------- model state
+let P = KWS.parseBlob(b64(GOLD.model));
+let fe, nn, det, mic = new KWS.PdmMic(), frames = 0, sampleCount = 0;
+const st = { thr: 12, n: 4, path: "pcm", gainDb: 0 };
+function newEngine() { fe = new KWS.FrontEnd(512); nn = new KWS.IntGRU(P); det = new KWS.Detector(st.thr, st.n, 2); mic = new KWS.PdmMic(); }
+newEngine();
+function specLine() {
+  const cs = KWS.chipSetup({ fclk: 50e6, bytes: P.bytes, rev: "B" });
+  $("specLine").textContent = `rev B · ${cs.d.chip.tiles} tiles · GRU H=${P.H} · ${P.F} bands · ${P.C} classes · model ${P.bytes.toLocaleString()} B streamed per 32 ms frame · chip ≈ ${cs.d.nnMs.toFixed(1)} ms/frame @ 50 MHz`;
+}
+specLine();
+function useModel(bytes, names) {
+  P = KWS.parseBlob(bytes); P.raw = bytes;
+  CL = names && names.length === P.C ? names.slice() : (P.C === GOLD.classes.length && !names ? GOLD.classes.slice() : Array.from({ length: P.C }, (_, i) => i === 0 ? "_silence_" : i === 1 ? "_unknown_" : `class${i}`));
+  KW = CL.slice(2); $("names").value = CL.join(", "); newEngine(); specLine(); chipUI(); drawBars(null); if (typeof xpModelChanged === 'function') xpModelChanged();
+}
+
+// ---------------------------------------------------------------- frame processing
+const frameQ = [];
+const pdmBuf = new Uint8Array(64);
+let lvlPeak = 0, lvlAcc = 0, lvlN = 0;
+function processSample(xf) {           // xf: float at 16 kHz, before gain
+  const g = Math.pow(10, st.gainDb / 20);
+  const v = xf * g;
+  let s = Math.round(v * 32767); if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
+  lvlAcc += v * v; lvlN++;
+  if (lvlN === 512) { const r = Math.sqrt(lvlAcc / 512); if (r > lvlPeak) lvlPeak = r; lvlAcc = 0; lvlN = 0; }
+  sampleCount++;
+  if (st.path === "pcm") { const f = fe.sample(s); if (f) onFeat(f); }
+  else {
+    mic.bits(v, pdmBuf);
+    for (let k = 0; k < 64; k++) { const y = fe.pdmBit(pdmBuf[k]); if (y !== null) { const f = fe.sample(y); if (f) onFeat(f); } }
+  }
+}
+let stepMs = 0;
+function onFeat(f) {
+  const t0 = performance.now();
+  const r = nn.step(f);
+  stepMs = 0.95 * stepMs + 0.05 * (performance.now() - t0);
+  const fire = det.step(r.top1, r.v1, r.v2);
+  frames++;
+  frameQ.push({ t: sampleCount / 16000, f, h: Int8Array.from(nn.h), logits: Int8Array.from(r.logits), top1: r.top1, v1: r.v1, v2: r.v2, fire });
+}
+
+// ---------------------------------------------------------------- audio input
+let ctx = null, stream = null, node = null, rs = null;
+class Resampler {                      // FIR low-pass (7.2 kHz) at the input rate + linear interpolation to 16 kHz
+  constructor(fin) {
+    this.step = fin / 16000; const N = Math.max(31, 2 * Math.ceil(fin / 16000 * 12) + 1); const fc = 7200 / fin;
+    this.h = new Float32Array(N); let s = 0;
+    for (let i = 0; i < N; i++) { const m = i - (N - 1) / 2; const sinc = m === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * m) / (Math.PI * m);
+      const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)) + 0.08 * Math.cos(4 * Math.PI * i / (N - 1)); this.h[i] = sinc * w; s += this.h[i]; }
+    for (let i = 0; i < N; i++) this.h[i] /= s;
+    this.buf = new Float32Array(N); this.bi = 0; this.pos = 0; this.prev = 0; this.cur = 0;
+  }
+  push(x, out) {
+    const h = this.h, N = h.length;
+    this.buf[this.bi] = x; this.bi = (this.bi + 1) % N;
+    let y = 0; for (let i = 0, j = this.bi; i < N; i++, j = (j + 1) % N) y += h[i] * this.buf[j];
+    this.prev = this.cur; this.cur = y; this.pos -= 1;
+    while (this.pos <= 0) { out(this.prev + (this.cur - this.prev) * (1 + this.pos)); this.pos += this.step; }
+  }
+}
+async function startMic() {
+  showErr("");
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("This browser context has no microphone API. Open the file in Chrome or Edge, or serve it from localhost.");
+    const agc = $("agc").value === "agc";
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: agc } });
+    try { ctx = new AudioContext({ sampleRate: 16000 }); ctx.createMediaStreamSource(stream); }
+    catch (e) { if (ctx) ctx.close(); ctx = new AudioContext(); }
+    const src = ctx.createMediaStreamSource(stream);
+    rs = ctx.sampleRate === 16000 ? null : new Resampler(ctx.sampleRate);
+    node = ctx.createScriptProcessor(2048, 1, 1);
+    node.onaudioprocess = e => {
+      const x = e.inputBuffer.getChannelData(0);
+      if (rs) for (let i = 0; i < x.length; i++) rs.push(x[i], processSample); else for (let i = 0; i < x.length; i++) processSample(x[i]);
+    };
+    const mute = ctx.createGain(); mute.gain.value = 0;
+    src.connect(node); node.connect(mute); mute.connect(ctx.destination);
+    $("micPill").classList.add("live"); $("micState").textContent = `Mic live · ${ctx.sampleRate} Hz${rs ? " → 16 kHz" : ""}`;
+    $("btnMic").textContent = "Stop microphone";
+  } catch (e) {
+    showErr("Microphone not available: " + (e && e.message ? e.message : e)); stopMic();
+  }
+}
+function stopMic() {
+  if (node) { node.disconnect(); node.onaudioprocess = null; node = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (ctx) { ctx.close(); ctx = null; }
+  $("micPill").classList.remove("live"); $("micState").textContent = "Mic off"; $("btnMic").textContent = "Start microphone";
+}
+function showErr(m) { $("errBox").hidden = !m; $("errBox").textContent = m; }
+$("btnMic").onclick = () => (ctx ? stopMic() : startMic());
+$("btnClear").onclick = () => { newEngine(); frames = 0; };
+
+// ---------------------------------------------------------------- controls
+function bindRange(id, key, fmt) { const el = $(id); const f = () => { st[key] = +el.value; $(id + "V").textContent = fmt(st[key]); det.thr = st.thr; det.n = st.n; }; el.oninput = f; f(); }
+bindRange("gain", "gainDb", v => `${v > 0 ? "+" : ""}${v} dB`);
+bindRange("thr", "thr", v => v);
+bindRange("nfr", "n", v => v);
+$("path").onchange = () => { st.path = $("path").value; newEngine(); };
+$("agc").onchange = () => { if (ctx) { stopMic(); startMic(); } };
+$("modelFile").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try { useModel(new Uint8Array(await f.arrayBuffer()), null); showErr(""); }
+  catch (err) { showErr("Model rejected: " + err.message); }
+};
+document.querySelectorAll(".tabs").forEach(tl => { const panel = tl.parentElement, bs = tl.querySelectorAll("button");
+  bs.forEach(b => b.onclick = () => {
+    bs.forEach(x => x.setAttribute("aria-selected", x === b));
+    panel.querySelectorAll(":scope > [data-pane]").forEach(p => p.hidden = p.dataset.pane !== b.dataset.tab);
+    if (typeof xp !== "undefined") xp.resize();
+  }); });
+
+// ---------------------------------------------------------------- drawing
+const spec = $("spec"), sctx = spec.getContext("2d"), bars = $("bars"), bctx = bars.getContext("2d");
+const COLS = 125;
+let specImg = null, ramp = [];
+function hexRgb(h) { h = h.replace("#", ""); if (h.length === 3) h = h.split("").map(c => c + c).join(""); const n = parseInt(h, 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function buildRamp() {
+  const a = hexRgb(css("--spec0")), b = hexRgb(css("--spec1")), c = hexRgb(css("--spec2")); ramp = [];
+  for (let i = 0; i < 160; i++) { const t = Math.max(0, (i - 40) / 120); const [p, q, u] = t < 0.55 ? [a, b, t / 0.55] : [b, c, (t - 0.55) / 0.45];
+    ramp.push(p.map((x, k) => Math.round(x + (q[k] - x) * u))); }
+}
+function sizeCanvases() {
+  for (const cv of [spec, bars]) { const r = cv.getBoundingClientRect(); cv.width = Math.max(200, Math.round(r.width * devicePixelRatio)); cv.height = Math.round(cv.getAttribute("height") * devicePixelRatio); cv.style.height = cv.getAttribute("height") + "px"; }
+  specImg = sctx.createImageData(COLS, 16); specImg.data.fill(0); buildRamp();
+  for (let i = 0; i < COLS * 16; i++) { const c = ramp[0]; specImg.data.set([c[0], c[1], c[2], 255], i * 4); }
+}
+let lastFrame = null;
+function pushSpec(f) {
+  const d = specImg.data;
+  for (let y = 0; y < 16; y++) { d.copyWithin(y * COLS * 4, y * COLS * 4 + 4, (y + 1) * COLS * 4); }
+  for (let k = 0; k < 16; k++) { const c = ramp[Math.min(159, f[k])]; const o = ((15 - k) * COLS + COLS - 1) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255; }
+}
+function drawSpec() {
+  const tmp = drawSpec.c || (drawSpec.c = document.createElement("canvas")); tmp.width = COLS; tmp.height = 16;
+  tmp.getContext("2d").putImageData(specImg, 0, 0);
+  sctx.imageSmoothingEnabled = false; sctx.drawImage(tmp, 0, 0, spec.width, spec.height);
+}
+function drawBars(fr) {
+  const W = bars.width, H = bars.height, dpr = devicePixelRatio; bctx.clearRect(0, 0, W, H);
+  const lab = 78 * dpr, row = H / P.C, x0 = lab + (W - lab - 10 * dpr) / 2, sc = (W - lab - 10 * dpr) / 80;   // full width = logits -40 … +40
+  bctx.font = `${12 * dpr}px ${css("--mono")}`; bctx.textBaseline = "middle";
+  bctx.fillStyle = css("--line"); bctx.fillRect(x0, 0, 1 * dpr, H);
+  for (let c = 0; c < P.C; c++) {
+    const v = fr && c < fr.logits.length ? fr.logits[c] : 0, y = c * row + row * 0.18, h = row * 0.64, top = fr && c === fr.top1;
+    bctx.fillStyle = top ? (c >= 2 && fr.v1 - fr.v2 >= st.thr ? css("--hot") : css("--accent")) : css("--muted");
+    bctx.globalAlpha = top ? 1 : 0.45;
+    const vc = Math.max(-40, Math.min(40, v)); bctx.fillRect(vc >= 0 ? x0 : x0 + vc * sc, y, Math.abs(vc) * sc, h); bctx.globalAlpha = 1;
+    bctx.fillStyle = top ? css("--ink") : css("--muted"); bctx.fillText(CL[c] || `class ${c}`, 4 * dpr, y + h / 2);
+  }
+  if (fr) { bctx.fillStyle = css("--muted"); bctx.textAlign = "right"; bctx.fillText(`margin ${fr.v1 - fr.v2} / THR ${st.thr}`, W - 4 * dpr, H - row * 0.5); bctx.textAlign = "left"; }
+}
+
+// ---------------------------------------------------------------- detections + log
+let detAt = 0, detCount = 0, lastDet = 0;
+const logEl = $("log");
+function onDetect(fr) {
+  detCount++; detAt = performance.now(); lastDet = fr.top1;
+  $("detWord").textContent = CL[fr.top1] || `class ${fr.top1}`; $("detWord").classList.add("fresh"); $("led").classList.add("on");
+  $("detMeta").textContent = `t = ${fr.t.toFixed(2)} s · margin ${fr.v1 - fr.v2} · class ${fr.top1}`;
+  const d = document.createElement("div"); d.textContent = `${fr.t.toFixed(2).padStart(8)} s  ${CL[fr.top1].padEnd(8)}  top1 ${fr.v1}  top2 ${fr.v2}`;
+  logEl.prepend(d); while (logEl.childNodes.length > 200) logEl.lastChild.remove();
+  test.onDetect(fr);
+}
+$("btnLogClear").onclick = () => { logEl.textContent = ""; detCount = 0; };
+
+// ---------------------------------------------------------------- guided performance test
+const test = {
+  running: false, trials: [], i: 0, phase: "", t0: 0, READY: 1.0, SPEAK: 2.6, TAIL: 0.5,
+  start() {
+    if (!ctx) { $("testStatus").textContent = "Start the microphone first"; return; }
+    const r = +$("rounds").value, kinds = [];
+    for (let k = 0; k < r; k++) { KW.forEach(w => kinds.push(w)); kinds.push("_silence_"); kinds.push("_unknown_"); }
+    for (let i = kinds.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [kinds[i], kinds[j]] = [kinds[j], kinds[i]]; }
+    this.trials = kinds.map(k => ({ target: k, dets: [], frames: [] }));
+    this.i = 0; this.running = true; this.phase = "ready"; this.t0 = sampleCount / 16000;
+    $("btnTest").textContent = "Stop test"; $("results").textContent = "";
+  },
+  stop(done) { this.running = false; $("btnTest").textContent = "Start test"; $("prog").style.width = "0";
+    $("prompt").className = "prompt ready"; $("prompt").textContent = done ? "Done" : "Stopped"; if (done) this.report(); },
+  label(k) { return k === "_silence_" ? "(stay silent)" : k === "_unknown_" ? "(say any other word)" : k; },
+  tick() {
+    if (!this.running) return;
+    const now = sampleCount / 16000, tr = this.trials[this.i], el = now - this.t0;
+    if (this.phase === "ready") {
+      $("prompt").className = "prompt ready"; $("prompt").textContent = this.label(tr.target);
+      $("prog").style.width = "0"; $("testStatus").textContent = `prompt ${this.i + 1} of ${this.trials.length} · get ready`;
+      if (el >= this.READY) { this.phase = "speak"; this.t0 = now; tr.ws = now; tr.we = now + this.SPEAK + this.TAIL; }
+    } else {
+      $("prompt").className = "prompt speak"; $("prog").style.width = Math.min(100, el / this.SPEAK * 100) + "%";
+      $("testStatus").textContent = `prompt ${this.i + 1} of ${this.trials.length} · speak now`;
+      if (el >= this.SPEAK) { this.i++; this.phase = "ready"; this.t0 = now; if (this.i >= this.trials.length) setTimeout(() => this.stop(true), (this.TAIL + 0.1) * 1000); }
+    }
+  },
+  onFrame(fr) { for (const tr of this.trials) if (tr.ws !== undefined && fr.t >= tr.ws && fr.t <= tr.we) tr.frames.push(fr); },
+  onDetect(fr) { for (const tr of this.trials) if (tr.ws !== undefined && fr.t >= tr.ws && fr.t <= tr.we) tr.dets.push(fr.top1); },
+  report() {
+    const kwT = this.trials.filter(t => KW.includes(t.target)), neg = this.trials.filter(t => !KW.includes(t.target));
+    let hit = 0, wrong = 0, miss = 0, cls = 0, fa = 0;
+    const cm = {}; KW.forEach(k => cm[k] = {});
+    for (const t of kwT) {
+      const tgt = CL.indexOf(t.target), uniq = [...new Set(t.dets)];
+      if (uniq.includes(tgt)) hit++; else if (uniq.length) wrong++; else miss++;
+      const d = uniq.length ? (uniq.includes(tgt) ? t.target : CL[uniq[0]]) : "none"; cm[t.target][d] = (cm[t.target][d] || 0) + 1;
+      let best = -1, bm = -999; for (const f of t.frames) if (f.top1 >= 2 && f.v1 - f.v2 > bm) { bm = f.v1 - f.v2; best = f.top1; }
+      t.best = best >= 0 ? CL[best] : "none"; if (best === tgt) cls++;
+    }
+    for (const t of neg) if (t.dets.length) fa++;
+    const pct = (a, b) => b ? (100 * a / b).toFixed(1) + " %" : "—";
+    const cols = [...KW, "none"];
+    let html = `<div class="tiles" style="margin-top:14px">
+      <div class="tile"><div class="v">${pct(hit, kwT.length)}</div><div class="k">detected correctly (${hit}/${kwT.length})</div></div>
+      <div class="tile"><div class="v">${pct(wrong, kwT.length)}</div><div class="k">wrong keyword fired</div></div>
+      <div class="tile"><div class="v">${pct(miss, kwT.length)}</div><div class="k">missed (no detection)</div></div>
+      <div class="tile"><div class="v">${pct(fa, neg.length)}</div><div class="k">false accepts on silence / other words (${fa}/${neg.length})</div></div>
+      <div class="tile"><div class="v">${pct(cls, kwT.length)}</div><div class="k">best-frame classification (threshold-free)</div></div></div>
+      <p class="note">Reference for this model on the official test set: 89.7 % clip classification; continuous stream at THR 12 / N 4: 80 % detected,
+      3.5 % wrong keyword. Your numbers include your voice, room, microphone and level (THR ${st.thr}, N ${st.n}, ${st.path.toUpperCase()} path).</p>
+      <h2 style="margin-top:12px">Confusion (prompt → detected)</h2><div class="tbl-wrap"><table class="cm"><tr><th></th>${cols.map(c => `<th class="num">${c}</th>`).join("")}</tr>`;
+    for (const k of KW) html += `<tr><th>${k}</th>${cols.map(c => { const v = cm[k][c] || 0; return `<td class="num ${v ? (c === k ? "hit" : "err") : ""}">${v || ""}</td>`; }).join("")}</tr>`;
+    html += `</table></div><div style="margin-top:10px"><button id="btnCopy">Copy results as JSON</button> <span class="muted" id="copyMsg"></span></div>`;
+    $("results").innerHTML = html;
+    const summary = { thr: st.thr, n: st.n, path: st.path, gainDb: st.gainDb, hit, wrong, miss, cls, keywordTrials: kwT.length, falseAccepts: fa, negativeTrials: neg.length,
+      trials: this.trials.map(t => ({ target: t.target, detections: t.dets.map(i => CL[i]), best: t.best })) };
+    $("btnCopy").onclick = () => navigator.clipboard.writeText(JSON.stringify(summary, null, 1)).then(() => $("copyMsg").textContent = "Copied", () => $("copyMsg").textContent = "Clipboard refused; select the text from the console");
+  }
+};
+$("btnTest").onclick = () => (test.running ? test.stop(false) : test.start());
+
+// ---------------------------------------------------------------- self-test (bit-exact)
+$("btnSelf").onclick = () => {
+  let rows = "", tot = 0, bad = 0, correct = 0;
+  for (const c of GOLD.clips) {
+    const pcm = new Int16Array(b64(c.pcm).buffer), f = new KWS.FrontEnd(512), g = new KWS.IntGRU(KWS.parseBlob(b64(GOLD.model)));
+    let t = 0, mm = 0, last = null;
+    for (const s of pcm) { const ft = f.sample(s); if (!ft) continue; const r = g.step(ft); last = r;
+      if (Array.from(ft).join() !== c.feats[t].join() || r.top1 !== c.tops[t][0] || r.v1 !== c.tops[t][1] || r.v2 !== c.tops[t][2]) mm++; t++; }
+    tot += t; bad += mm; if (GOLD.classes[last.top1] === c.label) correct++;
+    rows += `<tr><td>${c.label}</td><td>${GOLD.classes[last.top1]}</td><td class="num">${t}</td><td class="${mm ? "badc" : "ok"}">${mm ? mm + " frames differ" : "bit-exact"}</td></tr>`;
+  }
+  $("selfOut").innerHTML = `<div class="tiles" style="margin:12px 0"><div class="tile"><div class="v ${bad ? "badc" : "ok"}">${bad ? "FAIL" : "PASS"}</div><div class="k">${tot} frames, ${bad} mismatches against golden</div></div>
+    <div class="tile"><div class="v">${correct}/12</div><div class="k">clips classified correctly</div></div></div>
+    <div class="tbl-wrap"><table><tr><th>label</th><th>chip output</th><th class="num">frames</th><th>vs golden</th></tr>${rows}</table></div>`;
+};
+
+// ---------------------------------------------------------------- WAV analysis
+$("wavFile").onchange = async e => {
+  const file = e.target.files[0]; if (!file) return;
+  const out = $("wavOut"); out.textContent = "decoding…";
+  try {
+    const ac = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 16000, 16000);
+    const buf = await ac.decodeAudioData(await file.arrayBuffer());
+    const off = new OfflineAudioContext(1, Math.ceil(buf.duration * 16000), 16000);
+    const s = off.createBufferSource(); s.buffer = buf; s.connect(off.destination); s.start();
+    const x = (await off.startRendering()).getChannelData(0);
+    const f = new KWS.FrontEnd(512), g = new KWS.IntGRU(P), d = new KWS.Detector(st.thr, st.n, 2), gain = Math.pow(10, st.gainDb / 20);
+    const dets = []; let n = 0, peak = 0;
+    for (let i = 0; i < x.length; i++) { const v = x[i] * gain; peak = Math.max(peak, Math.abs(v)); let q = Math.round(v * 32767); q = q > 32767 ? 32767 : q < -32768 ? -32768 : q;
+      const ft = f.sample(q); if (!ft) continue; const r = g.step(ft); n++; if (d.step(r.top1, r.v1, r.v2)) dets.push({ t: (i + 1) / 16000, c: CL[r.top1], m: r.v1 - r.v2 }); }
+    out.innerHTML = `<p class="num">${file.name} · ${buf.duration.toFixed(1)} s · ${n} frames · peak ${(20 * Math.log10(peak + 1e-9)).toFixed(1)} dBFS · ${dets.length} detections (THR ${st.thr}, N ${st.n})</p>
+      <div class="tbl-wrap"><table><tr><th class="num">time (s)</th><th>keyword</th><th class="num">margin</th></tr>${dets.map(z => `<tr><td class="num">${z.t.toFixed(2)}</td><td>${z.c}</td><td class="num">${z.m}</td></tr>`).join("")}</table></div>`;
+  } catch (err) { out.textContent = "Could not decode this file: " + err.message; }
+};
+
+
+// ---------------------------------------------------------------- model creation (classifier-head training)
+const enroll = {
+  custom: [], takes: [], queue: [], cur: null, rec: false, phase: "", t0: 0, made: null,
+  READY: 0.8, SPEAK: 1.8, BG: 8.0,
+  load() { try { const d = JSON.parse(localStorage.getItem("tinykws.enroll") || "null"); if (d) { this.custom = d.custom || [];
+      this.takes = (d.takes || []).map(t => ({ cls: t.cls, val: t.val, vecs: t.vecs.map(v => Int8Array.from(atob(v), c => { const x = c.charCodeAt(0); return x > 127 ? x - 256 : x; })) })); } } catch (e) {} },
+  save() { try { localStorage.setItem("tinykws.enroll", JSON.stringify({ custom: this.custom,
+      takes: this.takes.map(t => ({ cls: t.cls, val: t.val, vecs: t.vecs.map(v => btoa(String.fromCharCode(...Uint8Array.from(v, x => x & 255)))) })) })); } catch (e) {} },
+  classes() { return ["_silence_", "_unknown_", ...($("mkBuiltin").checked ? GOLD.classes.slice(2) : []), ...this.custom]; },
+  count(c) { return this.takes.filter(t => t.cls === c).length; },
+  render() {
+    const cls = this.classes(), emb = c => EMB.vectors[c] ? b64(EMB.vectors[c]).length / 48 : 0;
+    let h = `<tr><th>class</th><th>index</th><th class="num">stored states</th><th class="num">your takes</th><th></th></tr>`;
+    cls.forEach((c, i) => {
+      const what = c === "_silence_" ? "Record background (8 s)" : c === "_unknown_" ? "Record other words" : "Record takes";
+      const rm = this.custom.includes(c) ? ` <button data-rm="${c}">Remove</button>` : "";
+      h += `<tr><td>${c}</td><td class="num">${i}</td><td class="num">${emb(c)}</td><td class="num">${this.count(c)}</td><td><button data-rec="${c}">${what}</button>${rm}</td></tr>`;
+    });
+    $("mkTable").innerHTML = h;
+    $("mkTable").querySelectorAll("[data-rec]").forEach(b => b.onclick = () => this.start(b.dataset.rec));
+    $("mkTable").querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { this.custom = this.custom.filter(x => x !== b.dataset.rm); this.takes = this.takes.filter(t => t.cls !== b.dataset.rm); this.save(); this.render(); });
+    const n = cls.length; $("mkStatus").textContent = n > 16 ? `${n} classes: the chip supports at most 16. Remove keywords or untick the built-in set.` : (ctx ? `${n} classes · ready` : "microphone must be running");
+  },
+  start(c) {
+    if (!ctx) { $("mkStatus").textContent = "Start the microphone first"; return; }
+    if (this.rec) return;
+    const n = c === "_silence_" ? 1 : +$("mkTakes").value;
+    this.queue = Array.from({ length: n }, () => c); this.rec = true; this.next();
+  },
+  next() {
+    if (!this.queue.length) { this.rec = false; this.cur = null; $("mkPrompt").className = "prompt ready"; $("mkPrompt").textContent = "Done"; $("mkProg").style.width = "0"; this.save(); this.render(); return; }
+    this.cur = { cls: this.queue.shift(), frames: [] }; this.phase = "ready"; this.t0 = sampleCount / 16000;
+  },
+  tick() {
+    if (!this.rec || !this.cur) return;
+    const now = sampleCount / 16000, el = now - this.t0, c = this.cur.cls, bg = c === "_silence_";
+    const label = bg ? "(stay quiet)" : c === "_unknown_" ? "(say any other word)" : c;
+    const dur = bg ? this.BG : this.SPEAK;
+    if (this.phase === "ready") {
+      $("mkPrompt").className = "prompt ready"; $("mkPrompt").textContent = label; $("mkProg").style.width = "0";
+      $("mkStatus").textContent = `${c}: take ${this.count(c) + 1} · get ready (${this.queue.length} more after this)`;
+      if (el >= this.READY) { this.phase = "speak"; this.t0 = now; this.cur.ws = now; this.cur.we = now + dur + 0.4; }
+    } else if (this.phase === "speak") {
+      $("mkPrompt").className = "prompt speak"; $("mkProg").style.width = Math.min(100, el / dur * 100) + "%";
+      $("mkStatus").textContent = `${c}: ${bg ? "recording background" : "speak now"}`;
+      if (now >= this.cur.we) { this.finish(); this.next(); }
+    }
+  },
+  onFrame(fr) { if (this.cur && this.cur.ws !== undefined && fr.t >= this.cur.ws && fr.t <= this.cur.we) this.cur.frames.push(fr); },
+  finish() {
+    const t = this.cur, fs = t.frames; if (fs.length < 4) return;
+    const E = fs.map(f => f.f.reduce((a, b) => a + b, 0)), mn = Math.min(...E), mx = Math.max(...E), p = E.indexOf(mx);
+    const val = this.count(t.cls) % 5 === 4;                         // every 5th take is held out for validation
+    if (t.cls === "_silence_") { this.takes.push({ cls: t.cls, val: false, vecs: fs.filter((_, i) => i % 2 === 0).map(f => f.h) }); return; }
+    if ((mx - mn) / 16 < 8) { $("mkStatus").textContent = "Too quiet: that take was discarded (raise the gain or speak closer)"; this.queue.unshift(t.cls); return; }
+    const lo = t.cls === "_unknown_" ? p - 2 : p + 3, hi = p + 12, vecs = [];
+    for (let i = Math.max(0, lo); i <= Math.min(fs.length - 1, hi); i++) vecs.push(fs[i].h);
+    this.takes.push({ cls: t.cls, val, vecs });
+    const quiet = []; for (let i = 0; i < p - 8; i++) if (E[i] < mn + 64) quiet.push(fs[i].h);
+    if (quiet.length) this.takes.push({ cls: "_silence_", val: false, vecs: quiet.filter((_, i) => i % 2 === 0) });
+  },
+  train() {
+    const cls = this.classes(); if (cls.length > 16) { $("mkOut").innerHTML = `<p class="badc">The chip supports at most 16 classes.</p>`; return; }
+    const missing = this.custom.filter(c => this.count(c) < 3);
+    if (missing.length) { $("mkOut").innerHTML = `<p class="warnc">Record at least 3 takes of: ${missing.join(", ")}</p>`; return; }
+    const X = [], y = [], Xv = [], yv = [], src = [];
+    cls.forEach((c, i) => { if (EMB.vectors[c]) { const b = b64(EMB.vectors[c]); for (let o = 0; o < b.length; o += 48) { X.push(Int8Array.from(b.subarray(o, o + 48), v => (v > 127 ? v - 256 : v))); y.push(i); } } });
+    const nStored = X.length;
+    // your takes: up-weighted x4 so a few recordings count against thousands of stored states
+    for (const t of this.takes) { const i = cls.indexOf(t.cls); if (i < 0) continue; for (const v of t.vecs) { if (t.val) { Xv.push(v); yv.push(i); } else for (let r = 0; r < 4; r++) { X.push(v); y.push(i); } } }
+    $("mkOut").innerHTML = `<p class="muted">Training on ${X.length.toLocaleString()} states (${nStored} stored, ${X.length - nStored} from your takes ×4)…</p>`;
+    let worker = null;
+    try { worker = new Worker(URL.createObjectURL(new Blob([document.getElementById("modelSrc").textContent + `
+      onmessage = e => { const K = self.KWS || globalThis.KWS; const { X, y, C, epochs } = e.data;
+        const head = K.trainHead(X, y, C, { epochs, onProgress: (it, loss) => postMessage({ it, loss }) }); postMessage({ done: true, head }); };`], { type: "text/javascript" }))); }
+    catch (err) { worker = null; }
+    const epochs = 500;
+    if (!worker) { setTimeout(() => this.finishTrain(KWS.trainHead(X, y, cls.length, { epochs }), cls, X, y, Xv, yv, nStored), 30); return; }
+    worker.onerror = () => { worker.terminate(); this.finishTrain(KWS.trainHead(X, y, cls.length, { epochs }), cls, X, y, Xv, yv, nStored); };
+    worker.onmessage = e => {
+      if (!e.data.done) { $("mkOut").innerHTML = `<p class="muted">Training… epoch ${e.data.it} / ${epochs} · loss ${e.data.loss.toFixed(3)}</p>`; return; }
+      worker.terminate(); this.finishTrain(e.data.head, cls, X, y, Xv, yv, nStored);
+    };
+    worker.postMessage({ X, y, C: cls.length, epochs });
+  },
+  finishTrain(head, cls, X, y, Xv, yv, nStored) {
+    const q = KWS.quantizeHead(head, X), blob = KWS.buildBlob(P.raw || b64(GOLD.model), q);
+    KWS.parseBlob(blob);
+    const acc = (XX, yy) => { const per = cls.map(() => [0, 0]); XX.forEach((h, n) => { const l = KWS.fcLogits(q.Wfc, q.Bfc, q.Sfc, h); const k = l.indexOf(Math.max(...l)); per[yy[n]][1]++; if (k === yy[n]) per[yy[n]][0]++; }); return per; };
+    const tr = acc(X.slice(0, nStored), y.slice(0, nStored)), va = acc(Xv, yv);
+    const pct = a => a[1] ? (100 * a[0] / a[1]).toFixed(0) + " %" : "—";
+    this.made = { blob, cls };
+    let rows = cls.map((c, i) => `<tr><td>${c}</td><td class="num">${i}</td><td class="num">${pct(tr[i])}</td><td class="num">${pct(va[i])}</td><td class="num">${va[i][1]}</td></tr>`).join("");
+    const vt = va.reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0]);
+    $("mkOut").innerHTML = `<div class="tiles" style="margin:12px 0">
+        <div class="tile"><div class="v">${pct(vt)}</div><div class="k">held-out accuracy on your takes (every 5th take, ${vt[1]} states)</div></div>
+        <div class="tile"><div class="v">${blob.length.toLocaleString()} B</div><div class="k">model blob · ${cls.length} classes · Sfc ${q.Sfc} · weights ×2^${q.wq}</div></div></div>
+      <div class="tbl-wrap"><table><tr><th>class</th><th class="num">index</th><th class="num">accuracy · stored states</th><th class="num">accuracy · your held-out takes</th><th class="num">held-out states</th></tr>${rows}</table></div>
+      <p class="note">Accuracies are per frame for the quantised chip classifier. Load the model into the bench and run the Guided test to measure detection with THR and N.
+        On the chip: write model.bin to PSRAM at BASE, keep THR/N/NFILL=2, and use classes.json to name the indices.</p>`;
+    ["mkUse", "mkBin", "mkHex", "mkJson"].forEach(id => $(id).disabled = false);
+  },
+  dl(name, data, type) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+};
+enroll.load();
+$("mkAdd").onclick = () => { const w = $("mkWord").value.trim().toLowerCase().replace(/[^a-z0-9_ -]/g, ""); if (!w || enroll.classes().includes(w)) return; enroll.custom.push(w); $("mkWord").value = ""; enroll.save(); enroll.render(); };
+$("mkWord").onkeydown = e => { if (e.key === "Enter") $("mkAdd").click(); };
+$("mkBuiltin").onchange = () => enroll.render();
+$("tabMake").addEventListener("click", () => enroll.render());
+$("mkTrain").onclick = () => enroll.train();
+$("mkUse").onclick = () => { useModel(enroll.made.blob, enroll.made.cls); $("mkStatus").textContent = `Model with ${enroll.made.cls.length} classes is now running in the bench`; };
+$("mkBin").onclick = () => enroll.dl("model.bin", enroll.made.blob, "application/octet-stream");
+$("mkHex").onclick = () => enroll.dl("model.hex", Array.from(enroll.made.blob, v => v.toString(16).padStart(2, "0")).join("\n") + "\n", "text/plain");
+$("mkJson").onclick = () => enroll.dl("classes.json", JSON.stringify({ classes: enroll.made.cls, nfill: 2, bytes: enroll.made.blob.length }, null, 1), "application/json");
+$("mkReset").onclick = () => { enroll.takes = []; enroll.save(); enroll.render(); $("mkOut").textContent = ""; };
+$("btnNames").onclick = () => { const n = $("names").value.split(",").map(s => s.trim()).filter(Boolean); if (n.length === P.C) { CL = n; KW = CL.slice(2); drawBars(lastFrame); xpModelChanged(); } else showErr(`The model has ${P.C} classes; enter ${P.C} names.`); };
+$("names").value = CL.join(", ");
+P.raw = b64(GOLD.model);
+
+// ---------------------------------------------------------------- chip set-up (register calculator)
+const hx = (v, w = 2) => "0x" + v.toString(16).toUpperCase().padStart(w, "0");
+function chipOpts() {
+  const base = parseInt($("cBase").value.replace(/^0x/i, ""), 16);
+  return { rev: $("cRev").value, fclk: +$("cMhz").value * 1e6, src: $("cSrc").value, mem: $("cMem").value,
+    base: Number.isFinite(base) ? base : NaN, div: +$("cDiv").value, rdDly: +$("cRd").value, pdmEdge: $("cEdge").value === "1",
+    bytes: P.bytes, thr: st.thr, n: st.n, nfill: 2 };
+}
+let chipText = { py: "", spi: "" };
+function chipUI() {
+  const o = chipOpts();
+  if (!Number.isFinite(o.base) || o.base < 0 || o.base > 0xFFFFFF) { $("chipMsgs").innerHTML = `<div class="msg e">Base address must be 0 … FFFFFF (hex).</div>`; return; }
+  const r = KWS.chipSetup(o), d = r.d, mhz = (o.fclk / 1e6).toFixed(3);
+  $("chipMsgs").innerHTML = r.errors.map(m => `<div class="msg e">${m}</div>`).join("") + r.warnings.map(m => `<div class="msg w">${m}</div>`).join("");
+  if (!r.regs.length) { $("chipTiles").innerHTML = ""; $("chipRegs").innerHTML = ""; $("chipCode").textContent = ""; return; }
+  const pct = x => `${(100 * x).toFixed(0)} %`;
+  const tile = (v, k, cls = "") => `<div class="tile"><div class="v ${cls}">${v}</div><div class="k">${k}</div></div>`;
+  $("chipTiles").innerHTML =
+    (o.src === "feat" ? tile("host", "features written to 0x11 every frame") :
+      tile(`${(d.fs / 1e3).toFixed(3)} kHz`, o.src === "pdm" ? `sample rate · PDM_CLK ${(d.fPdm / 1e6).toFixed(3)} MHz` : "sample rate (host, PCM via 0x10)") +
+      tile(pct(d.feLoad), `front-end load · ${d.chip.feClkLast} of ${Math.floor(d.clkPerSample)} clk per sample`, d.feLoad > 1 ? "badc" : "")) +
+    tile(`${d.nnMs.toFixed(2)} ms`, `network per ${d.frameMs.toFixed(1)} ms frame (${pct(d.nnLoad)})`, d.nnLoad > 0.9 ? "badc" : d.nnLoad > 0.25 ? "warnc" : "") +
+    tile(`${(d.csLowNs / 1e3).toFixed(2)} µs`, `CS low per ${d.burstBytes} B burst · SCK ${(d.fsck / 1e6).toFixed(3)} MHz`, o.mem !== "flash" && d.csLowNs > 8000 ? "badc" : "") +
+    tile(`${d.captureNs.toFixed(0)} ns`, `read capture after SCK fall (rd_dly ${d.rdDly})`);
+  $("chipRegs").innerHTML = `<tr><th>#</th><th class="num">addr</th><th>register</th><th class="num">value</th><th>meaning</th></tr>` +
+    r.regs.map((x, i) => `<tr><td class="num">${i + 1}</td><td class="num">${hx(x.a)}</td><td class="mono">${x.name}</td><td class="num">${hx(x.v)}</td><td>${x.why}</td></tr>`).join("");
+  const memName = { ramA: "PSRAM A (CS1)", ramB: "PSRAM B (CS2)", flash: "flash (CS0)" }[o.mem], cs = { ramA: "CS1", ramB: "CS2", flash: "CS0" }[o.mem];
+  const src = { pdm: "PDM microphone", pcm: "PCM from the host", feat: "features from the host" }[o.src];
+  const v = n => r.regs.find(x => x.name === n).v;
+  chipText.py = [
+    `# tt_um_rakesh_tiny_kws rev ${o.rev} (${d.chip.tiles}) at ${mhz} MHz · ${src} · model in ${memName} at ${hx(o.base, 6)}`,
+    `from kws_host import *`,
+    `k = KWS(pins)                                   # bind your board's pin functions`,
+    `k.wr(CTRL, 0)                                   # RUN = 0 releases the QSPI bus`,
+    o.mem === "flash" ? `# program model.bin into the flash at ${hx(o.base, 6)} beforehand (QE bit set)` :
+      `k.load_model(open("model.bin", "rb").read(), cs=${cs}, base=${hx(o.base, 6)})`,
+    `info, warn = k.configure(${o.fclk}, src="${o.src}", mem="${o.mem}", base=${hx(o.base, 6)}, thr=${o.thr}, n=${o.n}${o.rev !== "B" ? `, rev="${o.rev}"` : ""}${o.div ? `, div=${o.div}` : ""}${o.rdDly >= 0 ? `, rd_dly=${o.rdDly}` : ""}${o.pdmEdge ? ", pdm_edge=True" : ""})`,
+    `# configure() writes:`,
+    ...r.regs.map(x => `#   k.wr(${hx(x.a)}, ${hx(x.v)})   # ${x.name}`),
+    o.src === "pcm" ? `# then: k.push_pcm(sample) at 16 kHz (SPI clock ≤ ${(o.fclk / 8e6).toFixed(2)} MHz)` :
+      o.src === "feat" ? `# then: k.wr(FEAT, *16 feature bytes) once per frame` : `while True: print(k.poll())`,
+  ].join("\n");
+  const fr = a => a.map(b => hx(b).slice(2)).join(" ");
+  chipText.spi = [
+    `# SPI mode 0, first byte {R/W̄=0, addr}, address auto-increments (≤ f_clk/8 = ${(o.fclk / 8e6).toFixed(2)} MHz)`,
+    `${fr([0x01, v("PDM_DIV"), v("MEMCFG"), v("BURST"), v("BASE0"), v("BASE1"), v("BASE2"), v("THR"), v("DETCFG")])}   # 0x01…0x08`,
+    `${fr([0x00, v("CTRL")])}   # CTRL last: start`,
+  ].join("\n");
+  $("chipCode").textContent = chipText.py + "\n\n" + chipText.spi;
+  $("chipNote").textContent = `THR ${o.thr} and N ${o.n} come from Settings. Read capture delay is a start value; sweep it on your board (0x02 bits 7:5).`;
+}
+const copy = t => (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).catch(() => {
+  const a = document.createElement("textarea"); a.value = t; document.body.appendChild(a); a.select(); document.execCommand("copy"); a.remove(); });
+$("chipCopyPy").onclick = () => copy(chipText.py);
+$("chipCopySpi").onclick = () => copy(chipText.spi);
+$("cPreset").onchange = () => { if ($("cPreset").value !== "x") $("cMhz").value = $("cPreset").value; chipUI(); };
+$("cMhz").oninput = () => { const v = $("cMhz").value; $("cPreset").value = ["50", "40", "25", "16.384"].includes(String(+v)) ? String(+v) : "x"; chipUI(); };
+["cRev", "cSrc", "cMem", "cDiv", "cRd", "cEdge"].forEach(id => $(id).onchange = chipUI);
+$("cBase").oninput = chipUI;
+["thr", "nfr"].forEach(id => $(id).addEventListener("input", chipUI));
+chipUI();
+
+// ---------------------------------------------------------------- experiences (driven by DETECT + DET_CLASS, like the silicon)
+const xp = {
+  idx(name) { return CL.indexOf(name); },
+  name(i) { return CL[i] || `class ${i}`; },
+  need(words) { const miss = words.filter(w => this.idx(w) < 0); return miss.length ? `This model has no ${miss.join(", ")}; load a model with these words or rename the classes in Settings.` : ""; },
+  fit(cv) { const r = cv.getBoundingClientRect(); if (!r.width) return false; const w = Math.round(r.width * devicePixelRatio), h = Math.round(+cv.getAttribute("height") * devicePixelRatio);
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; cv.style.height = cv.getAttribute("height") + "px"; } return true; },
+  resize() { maze.draw(); inside.draw(true); },
+  onFrame(fr) { inside.onFrame(fr); },
+  active() { const t = document.querySelector('#xpPanel .tabs [aria-selected="true"]'); return t ? t.dataset.tab : ""; },
+  onDetect(fr) { inside.onDetect(fr); const a = this.active();           // only the experience on screen reacts
+    if (a === "xmaze") maze.onDetect(fr); else if (a === "xlock") lock.onDetect(fr); else if (a === "xspell") spell.onDetect(fr); },
+  tick() { maze.tick(); lock.tick(); spell.tick(); inside.tick(); },
+};
+const nowS = () => sampleCount / 16000;
+
+// ---- voice maze
+const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+const maze = {
+  W: 11, H: 7, open: null, pos: [0, 0], hist: [], trail: new Set(), last: null, t0: 0, tEnd: 0, cmds: 0, bumps: 0, msg: "",
+  gen() {
+    const [W, H] = $("mzSize").value.split(",").map(Number); this.W = W; this.H = H;
+    this.open = Array.from({ length: W * H }, () => ({ up: false, down: false, left: false, right: false }));
+    const seen = new Uint8Array(W * H), stack = [[0, 0]]; seen[0] = 1;
+    const opp = { up: "down", down: "up", left: "right", right: "left" };
+    while (stack.length) {
+      const [x, y] = stack[stack.length - 1];
+      const nb = Object.entries(DIRS).map(([d, [dx, dy]]) => [d, x + dx, y + dy]).filter(([, a, b]) => a >= 0 && b >= 0 && a < W && b < H && !seen[b * W + a]);
+      if (!nb.length) { stack.pop(); continue; }
+      const [d, a, b] = nb[Math.floor(Math.random() * nb.length)];
+      this.open[y * W + x][d] = true; this.open[b * W + a][opp[d]] = true; seen[b * W + a] = 1; stack.push([a, b]);
+    }
+    this.pos = [0, 0]; this.hist = []; this.trail = new Set(["0,0"]); this.last = null; this.t0 = 0; this.tEnd = 0; this.cmds = 0; this.bumps = 0;
+    this.msg = "Say a direction"; this.draw(); this.stats();
+  },
+  cell(x, y) { return this.open[y * this.W + x]; },
+  move(d) {
+    let [x, y] = this.pos; const c = this.cell(x, y);
+    if (!c[d]) { this.bumps++; this.msg = "Wall"; return; }
+    this.hist.push(this.pos.slice()); const [dx, dy] = DIRS[d], opp = { up: "down", down: "up", left: "right", right: "left" }[d];
+    for (;;) {
+      x += dx; y += dy; this.trail.add(`${x},${y}`);
+      if (x === this.W - 1 && y === this.H - 1) break;
+      const o = this.cell(x, y), exits = Object.keys(DIRS).filter(k => o[k] && k !== opp);
+      if (!(exits.length === 1 && exits[0] === d)) break;           // stop at a junction, turn or dead end
+    }
+    this.pos = [x, y]; this.last = d; this.msg = d;
+    if (x === this.W - 1 && y === this.H - 1) { this.tEnd = nowS(); this.msg = "Solved"; }
+  },
+  onDetect(fr) {
+    const w = xp.name(fr.top1); if (this.tEnd || !["up", "down", "left", "right", "go", "no"].includes(w)) { $("mzHeard").textContent = `heard “${w}”`; return; }
+    if (!this.t0) this.t0 = fr.t; this.cmds++;
+    if (w === "no") { if (this.hist.length) { this.pos = this.hist.pop(); this.msg = "back"; } }
+    else if (w === "go") { if (this.last) this.move(this.last); else this.msg = "Say a direction first"; }
+    else this.move(w);
+    $("mzHeard").textContent = `heard “${w}” at ${fr.t.toFixed(1)} s`; this.draw(); this.stats();
+  },
+  stats() {
+    const t = this.t0 ? (this.tEnd || nowS()) - this.t0 : 0;
+    $("mzTime").textContent = `${t.toFixed(1)} s`; $("mzCmds").textContent = this.cmds; $("mzBumps").textContent = this.bumps;
+    $("mzStatus").textContent = this.tEnd ? `Solved in ${t.toFixed(1)} s` : this.msg;
+    $("mzStatus").style.color = this.tEnd ? css("--good") : "";
+  },
+  tick() { if (this.t0 && !this.tEnd) $("mzTime").textContent = `${(nowS() - this.t0).toFixed(1)} s`;
+    if (!ctx && !this.cmds) $("mzHeard").textContent = "start the microphone to play"; else if (!this.cmds && $("mzHeard").textContent.startsWith("start")) $("mzHeard").textContent = xp.need(["up", "down", "left", "right"]) || "—"; },
+  draw() {
+    const cv = $("mzCv"); if (!this.open || !xp.fit(cv)) return; const g = cv.getContext("2d"), dpr = devicePixelRatio;
+    const cs = Math.floor(Math.min(cv.width / this.W, cv.height / this.H)), ox = Math.floor((cv.width - cs * this.W) / 2), oy = Math.floor((cv.height - cs * this.H) / 2);
+    g.clearRect(0, 0, cv.width, cv.height); g.fillStyle = css("--bg"); g.fillRect(ox, oy, cs * this.W, cs * this.H);
+    g.fillStyle = css("--accent-soft"); for (const k of this.trail) { const [x, y] = k.split(",").map(Number); g.fillRect(ox + x * cs, oy + y * cs, cs, cs); }
+    g.fillStyle = css("--hot"); const p = cs * 0.2; g.fillRect(ox + (this.W - 1) * cs + p, oy + (this.H - 1) * cs + p, cs - 2 * p, cs - 2 * p);
+    g.strokeStyle = css("--ink"); g.lineWidth = Math.max(2, 2 * dpr); g.lineCap = "square"; g.beginPath();
+    for (let y = 0; y < this.H; y++) for (let x = 0; x < this.W; x++) {
+      const c = this.cell(x, y), X = ox + x * cs, Y = oy + y * cs;
+      if (!c.up) { g.moveTo(X, Y); g.lineTo(X + cs, Y); } if (!c.left) { g.moveTo(X, Y); g.lineTo(X, Y + cs); }
+      if (y === this.H - 1 && !c.down) { g.moveTo(X, Y + cs); g.lineTo(X + cs, Y + cs); } if (x === this.W - 1 && !c.right) { g.moveTo(X + cs, Y); g.lineTo(X + cs, Y + cs); }
+    }
+    g.stroke(); g.fillStyle = css("--accent"); g.beginPath(); g.arc(ox + (this.pos[0] + 0.5) * cs, oy + (this.pos[1] + 0.5) * cs, cs * 0.3, 0, 2 * Math.PI); g.fill();
+  },
+};
+$("mzNew").onclick = () => maze.gen(); $("mzSize").onchange = () => maze.gen();
+
+// ---- spoken combination lock
+const lock = {
+  code: [], pos: 0, lastT: 0, fails: 0, until: 0, open: false, openAt: 0, hide: false, nOpen: 0, nWrong: 0,
+  init() {
+    const want = ["up", "left", "go", "yes"].map(w => xp.idx(w)), kw = CL.map((_, i) => i).slice(2);
+    this.code = want.every(i => i >= 2) ? want : kw.slice(0, 4);
+    $("lkPick").innerHTML = this.code.map((c, k) => `<select data-k="${k}" aria-label="word ${k + 1}">${kw.map(i => `<option value="${i}"${i === c ? " selected" : ""}>${xp.name(i)}</option>`).join("")}</select>`).join("");
+    $("lkPick").querySelectorAll("select").forEach(el => el.onchange = () => { this.code[+el.dataset.k] = +el.value; this.reset(); });
+    this.reset();
+  },
+  reset() { this.pos = 0; this.open = false; this.fails = 0; this.until = 0; this.render(); },
+  render() {
+    $("lkDots").innerHTML = this.code.map((c, k) => `<div class="${k < this.pos || this.open ? "done" : k === this.pos ? "next" : ""}">${this.hide && !(k < this.pos || this.open) ? "•••" : xp.name(c)}</div>`).join("");
+    const t = nowS(), st = $("lkState");
+    if (this.open) { st.textContent = "OPEN"; st.className = "lockstate open"; }
+    else if (t < this.until) { st.textContent = `LOCKED OUT ${Math.ceil(this.until - t)} s`; st.className = "lockstate bad"; }
+    else { st.textContent = "LOCKED"; st.className = "lockstate shut"; }
+    $("lkStats").textContent = `${this.nOpen} opening${this.nOpen === 1 ? "" : "s"} · ${this.nWrong} wrong word${this.nWrong === 1 ? "" : "s"}`;
+  },
+  onDetect(fr) {
+    const w = fr.top1, t = fr.t; let note = `heard “${xp.name(w)}”`;
+    if (this.open) { $("lkHeard").textContent = note + " · already open"; return; }
+    if (t < this.until) { $("lkHeard").textContent = note + " · locked out"; this.render(); return; }
+    if (this.pos && t - this.lastT > 5) this.pos = 0;
+    if (w === this.code[this.pos]) { this.pos++; this.lastT = t; this.fails = 0; note += " ✓";
+      if (this.pos === 4) { this.open = true; this.openAt = t; this.nOpen++; note += ` · opened in ${(t - this.firstT).toFixed(1)} s`; }
+      else if (this.pos === 1) this.firstT = t;
+    } else {
+      this.nWrong++; this.fails++; note += " ✗ start over";
+      this.pos = w === this.code[0] ? 1 : 0; if (this.pos) { this.lastT = t; this.firstT = t; }
+      if (this.fails >= 3) { this.until = t + 10; this.fails = 0; this.pos = 0; note += " · 10 s lock-out"; }
+    }
+    $("lkHeard").textContent = note; this.render();
+  },
+  tick() {
+    const t = nowS(), bar = $("lkTimer");
+    bar.style.width = this.pos && !this.open ? `${Math.max(0, 100 * (1 - (t - this.lastT) / 5))}%` : "0%";
+    if (this.pos && !this.open && t - this.lastT > 5) { this.pos = 0; $("lkHeard").textContent = "too slow · start over"; this.render(); }
+    if (this.open && t - this.openAt > 8) { this.open = false; this.pos = 0; $("lkHeard").textContent = "locked again"; this.render(); }
+    if (this.until && t < this.until + 1) this.render();
+  },
+};
+$("lkReset").onclick = () => lock.reset();
+$("lkHide").onclick = () => { lock.hide = !lock.hide; $("lkHide").textContent = lock.hide ? "Show the code" : "Hide the code"; lock.render(); };
+
+// ---- hands-free speller
+const KEYS = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ", "␣", ".", ",", "?"];
+const spell = {
+  cur: 0, text: "", cmds: 0, t0: 0, lastStop: -9,
+  render() {
+    $("spKbd").innerHTML = KEYS.map((k, i) => `<div class="${i === this.cur ? "cur" : ""}">${k}</div>`).join("");
+    $("spText").innerHTML = this.text.replace(/&/g, "&amp;").replace(/</g, "&lt;") + '<span class="caret"></span>';
+    $("spCmds").textContent = this.cmds;
+    const min = this.t0 ? (nowS() - this.t0) / 60 : 0; $("spCpm").textContent = min > 0.05 && this.text.length ? (this.text.length / min).toFixed(1) : "—";
+  },
+  onDetect(fr) {
+    const w = xp.name(fr.top1), n = KEYS.length; let note = `heard “${w}”`;
+    if (!["up", "down", "left", "right", "yes", "go", "no", "stop"].includes(w)) { $("spHeard").textContent = note; return; }
+    this.cmds++;
+    if (w === "left") this.cur = this.cur % 6 === 0 ? this.cur + 5 : this.cur - 1;
+    else if (w === "right") this.cur = this.cur % 6 === 5 ? this.cur - 5 : this.cur + 1;
+    else if (w === "up") this.cur = (this.cur - 6 + n) % n;
+    else if (w === "down") this.cur = (this.cur + 6) % n;
+    else if (w === "yes" || w === "go") { if (!this.t0) this.t0 = fr.t; this.text += KEYS[this.cur] === "␣" ? " " : KEYS[this.cur]; note += ` → typed “${KEYS[this.cur]}”`; }
+    else if (w === "no") { this.text = this.text.slice(0, -1); note += " → deleted"; }
+    else if (w === "stop") { if (fr.t - this.lastStop < 3) { this.text = ""; this.t0 = 0; note += " → cleared"; } else note += " → say stop again to clear"; this.lastStop = fr.t; }
+    $("spHeard").textContent = note; this.render();
+  },
+  tick() { if (!ctx && !this.cmds) $("spHeard").textContent = "start the microphone to type"; },
+};
+$("spClear").onclick = () => { spell.text = ""; spell.t0 = 0; spell.render(); };
+
+// ---- inside the chip: hidden state + output pins
+const inside = {
+  N: 125, hs: [], la: [], tgl: 0, cls: 0, nDet: 0, dirty: true,
+  onFrame(fr) {
+    this.tgl ^= 1; if (fr.fire) this.cls = fr.top1 & 15;
+    this.hs.push(fr.h); this.la.push([this.tgl, fr.fire ? 1 : 0, this.cls]);
+    if (this.hs.length > this.N) { this.hs.shift(); this.la.shift(); }
+    this.dirty = true;
+  },
+  onDetect() { this.nDet++; },
+  tick() { if (this.dirty && !$("inH").closest("[data-pane]").hidden) { this.draw(); this.dirty = false; } this.tiles(); },
+  tiles() {
+    const bitsIn = sampleCount * (st.path === "pdm" ? 64 : 16), bitsOut = this.nDet * 4;
+    const fmt = v => v >= 1e6 ? `${(v / 1e6).toFixed(1)} M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)} k` : `${v}`;
+    const html = `<div class="tile"><div class="v">${fmt(bitsIn)}</div><div class="k">audio bits into the chip (${st.path === "pdm" ? "1-bit PDM at 1.024 MHz" : "16-bit PCM at 16 kHz"})</div></div>
+      <div class="tile"><div class="v">${fmt(bitsOut)}</div><div class="k">bits out on DET_CLASS (${this.nDet} detections × 4)</div></div>
+      <div class="tile"><div class="v">${bitsOut ? fmt(Math.round(bitsIn / bitsOut)) + " : 1" : "—"}</div><div class="k">reduction from sound to answer</div></div>
+      <div class="tile"><div class="v">48 B</div><div class="k">the network's whole memory of the past (hidden state)</div></div>`;
+    if (html !== this.lastTiles) { $("inTiles").innerHTML = html; this.lastTiles = html; }
+  },
+  draw() {
+    const cv = $("inH"), la = $("inLA"); if (!xp.fit(cv) || !xp.fit(la)) return;
+    const g = cv.getContext("2d"), N = this.N, H = 48, bg = hexRgb(css("--surface")), neg = hexRgb(css("--accent")), pos = hexRgb(css("--hot"));
+    const img = g.createImageData(N, H);
+    for (let x = 0; x < N; x++) { const h = this.hs[this.hs.length - N + x];
+      for (let y = 0; y < H; y++) { const v = h ? h[y] : 0, a = Math.min(1, Math.abs(v) / 100), c = v < 0 ? neg : pos, o = (y * N + x) * 4;
+        img.data[o] = bg[0] + (c[0] - bg[0]) * a; img.data[o + 1] = bg[1] + (c[1] - bg[1]) * a; img.data[o + 2] = bg[2] + (c[2] - bg[2]) * a; img.data[o + 3] = 255; } }
+    const tmp = this.tmp || (this.tmp = document.createElement("canvas")); tmp.width = N; tmp.height = H; tmp.getContext("2d").putImageData(img, 0, 0);
+    g.imageSmoothingEnabled = false; g.clearRect(0, 0, cv.width, cv.height); g.drawImage(tmp, 0, 0, cv.width, cv.height);
+    // logic analyser
+    const q = la.getContext("2d"), dpr = devicePixelRatio, W = la.width, lab = 92 * dpr, dx = (W - lab) / N, row = la.height / 3;
+    q.clearRect(0, 0, W, la.height); q.font = `${11 * dpr}px ${css("--mono")}`; q.textBaseline = "middle"; q.fillStyle = css("--muted");
+    ["FRAME uo[3]", "DETECT uo[2]", "CLASS uo[7:4]"].forEach((t, i) => q.fillText(t, 0, row * (i + 0.5)));
+    q.lineWidth = 1.5 * dpr; const L = this.la, off = N - L.length;
+    [[0, css("--accent")], [1, css("--hot")]].forEach(([k, col]) => {
+      q.strokeStyle = col; q.beginPath(); const y0 = row * (k + 0.8), y1 = row * (k + 0.2);
+      L.forEach((s, i) => { const x = lab + (off + i) * dx, y = s[k] ? y1 : y0; if (i === 0) q.moveTo(x, y); else q.lineTo(x, y); q.lineTo(x + dx, y); });
+      q.stroke(); });
+    q.strokeStyle = css("--ink"); q.fillStyle = css("--ink"); const yb = row * 2.5, hb = row * 0.28; let start = 0;
+    for (let i = 1; i <= L.length; i++) if (i === L.length || L[i][2] !== L[start][2]) {
+      const x0 = lab + (off + start) * dx, x1 = lab + (off + i) * dx, e = Math.min(4 * dpr, (x1 - x0) / 2);
+      q.beginPath(); q.moveTo(x0, yb); q.lineTo(x0 + e, yb - hb); q.lineTo(x1 - e, yb - hb); q.lineTo(x1, yb); q.lineTo(x1 - e, yb + hb); q.lineTo(x0 + e, yb + hb); q.closePath(); q.stroke();
+      const label = `${L[start][2].toString(16).toUpperCase()} ${L[start][2] ? xp.name(L[start][2]) : ""}`.trim();
+      if (x1 - x0 > q.measureText(label).width + 10 * dpr) q.fillText(label, x0 + 6 * dpr, yb); else if (x1 - x0 > 14 * dpr) q.fillText(L[start][2].toString(16).toUpperCase(), x0 + 4 * dpr, yb);
+      start = i; }
+  },
+};
+xp.need = xp.need.bind(xp);
+function xpModelChanged() { lock.init(); spell.render(); maze.stats(); inside.cls = 0; }
+maze.gen(); lock.init(); spell.render();
+addEventListener("resize", () => xp.resize());
+
+// ---------------------------------------------------------------- UI loop
+function ui() {
+  let drew = false;
+  while (frameQ.length) {
+    const fr = frameQ.shift(); lastFrame = fr; pushSpec(fr.f); drew = true;
+    test.onFrame(fr); enroll.onFrame(fr); xp.onFrame(fr); if (fr.fire) { onDetect(fr); xp.onDetect(fr); }
+  }
+  if (drew) {
+    drawSpec(); drawBars(lastFrame);
+    $("rRes").textContent = ((lastFrame.top1 << 4) | lastDet).toString(16).padStart(2, "0").toUpperCase();
+    $("rT1").textContent = lastFrame.v1; $("rT2").textContent = lastFrame.v2; $("rFr").textContent = frames & 0xffff;
+    $("perf").textContent = `${frames} frames · JS model ${stepMs.toFixed(2)} ms per frame`;
+    const pk = 20 * Math.log10(lvlPeak + 1e-9); lvlPeak *= 0.85;
+    const pos = v => Math.max(0, Math.min(100, (v + 60) / 60 * 100));
+    $("meterBar").style.width = pos(pk) + "%"; $("meterPk").style.left = pos(pk) + "%";
+    $("levelText").textContent = `frame peak ${isFinite(pk) ? pk.toFixed(1) : "−∞"} dBFS · aim speech peaks into the shaded band (−25 … −9 dBFS)`;
+    $("logStats").textContent = `listening time ${(sampleCount / 16000).toFixed(0)} s · ${detCount} detections`;
+  }
+  if (performance.now() - detAt > 1200) { $("led").classList.remove("on"); $("detWord").classList.remove("fresh"); }
+  test.tick(); enroll.tick(); xp.tick();
+  requestAnimationFrame(ui);
+}
+function initMeter() { const pos = v => (v + 60) / 60 * 100; $("meterBand").style.left = pos(-25) + "%"; $("meterBand").style.width = (pos(-9) - pos(-25)) + "%"; }
+sizeCanvases(); initMeter(); drawBars(null); drawSpec();
+addEventListener("resize", () => { sizeCanvases(); drawSpec(); drawBars(lastFrame); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { buildRamp(); drawBars(lastFrame); xp.resize(); });
+requestAnimationFrame(ui);
+</script>
