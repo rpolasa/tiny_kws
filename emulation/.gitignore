@@ -1,0 +1,9 @@
+# build outputs and IDE folders (VS Code Pico extension regenerates .vscode on Import Project)
+build/
+.vscode/
+__pycache__/
+fpga_lattice/icesugar/sim/sim_build*/
+fpga_lattice/icesugar/sim/sb_*/
+fpga_lattice/icesugar/sim/results*.xml
+*.vcd
+*.fst

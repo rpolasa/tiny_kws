@@ -1,0 +1,62 @@
+# tiny_kws FPGA emulation - Muse Lab iCESugar v1.5 (iCE40UP5K-SG48)
+# FPGA pin numbers from the board's io.pcf / iCESugar-v1.5 schematic (github.com/wuxx/icesugar)
+
+# 12 MHz from iCELink (MCO), PLL input pad
+set_io clk_12m     35
+
+# ---- PMOD2: uio[7:0] in Tiny Tapeout QSPI-Pmod order -> Pico 2 W PSRAM emulator (or the TT QSPI Pmod)
+# iCESugar header numbering: top row pins 1-4, bottom row pins 12-9 (pin 12 is opposite pin 1);
+# a standard Pmod's pins 7-10 therefore land on iCESugar pins 12-9.
+# pin 1 (pcf P2_1): CS0 flash (not used, model in PSRAM B)
+set_io uio[0]      46
+# pin 2 (P2_2): SD0 -> Pico GP10
+set_io uio[1]      44
+# pin 3 (P2_3): SD1 -> Pico GP11
+set_io uio[2]      42
+# pin 4 (P2_4): SCK -> Pico GP14
+set_io uio[3]      37
+# pin 12 (P2_12), opposite pin 1 = Pmod pin 7: SD2 -> Pico GP12
+set_io uio[4]      45
+# pin 11 (P2_11) = Pmod pin 8: SD3 -> Pico GP13
+set_io uio[5]      43
+# pin 10 (P2_10) = Pmod pin 9: CS1 RAM A -> Pico GP8 (monitor only)
+set_io uio[6]      38
+# pin 9 (P2_9), opposite pin 4 = Pmod pin 10: CS2 RAM B -> Pico GP15
+set_io uio[7]      36
+
+# ---- PMOD3: microphone, host SPI, status (header pins 1-4 top row, 12-9 bottom row)
+# P3_1  ui[0]  <- mic DAT
+set_io pdm_dat     34
+# P3_2  uo[0]  -> mic CLK
+set_io pdm_clk     31
+# P3_3  ui[1]  <- Pico GP18 (SPI0 SCK)
+set_io spi_sck     27
+# P3_4  ui[2]  <- Pico GP19 (SPI0 TX)
+set_io spi_mosi    25
+# P3_9  ui[3]  <- Pico GP17
+set_io spi_csn     23
+# P3_10 uo[1]  -> Pico GP16 (SPI0 RX)
+set_io spi_miso    26
+# P3_11 uo[2]  -> Pico GP20
+set_io detect      28
+# P3_12 uo[3]  -> Pico GP21
+set_io frame       32
+
+# ---- PMOD1 (only the pins not shared with iCELink USB / UART)
+# P1_3  uo[4]
+set_io det_class[0] 3
+# P1_4  uo[5]
+set_io det_class[1] 48
+# P1_9  uo[6]
+set_io det_class[2] 47
+# P1_10 uo[7]
+set_io det_class[3] 2
+
+# ---- PMOD4 pin 1 / DIP switch 1 (4.7k pull-up): host reset, active low. Keep SW1 OFF.
+# <- Pico GP22
+set_io host_rst_n  21
+
+# ---- RGB LED (SB_RGBA_DRV pads)
+set_io led_b       39
+set_io led_r       40
+set_io led_g       41

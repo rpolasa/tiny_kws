@@ -1,0 +1,7 @@
+288e08c61a13e7068cd5525e7594e57c  kws_coef_rom.v
+1aa8c58bb2b62f98c7c255507928e80a  kws_frontend.v
+1aed540b1f12c862d4afd2689e44c6c0  kws_nn.v
+6983a643aab7cc7f25b3dd0b6c8dcde3  kws_qspi.v
+7f2eb9538079ad80c31aa79d0b81fcf1  kws_spi_slave.v
+02a962ce4da07c075ba98d59de25b82d  kws_sreg.v
+66ca60f4da68d8c3be95a930d14e408e  project.v

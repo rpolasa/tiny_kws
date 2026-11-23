@@ -1,0 +1,54 @@
+; PDM microphone interface for kws_pico - emulates the chip's PDM_CLK output (uo[0]) and
+; PDM_DAT capture (ui[0]).  4 PIO cycles per PDM bit: CLK low for 2, high for 2.
+; The PIO clock is set to 4 x 1.024 MHz, so PDM_CLK = 1.024 MHz and f_s = 1.024 MHz / 64 = 16 kHz.
+; Bits are shifted in MSB-first and auto-pushed as 32-bit words (first bit in bit 31).
+;
+; Which phase carries the data depends on the microphone's L/R (SEL) pin:
+;   SEL = GND : data driven while CLK is low  -> pdm_rise (sampled late in the low phase,
+;               i.e. just before the rising edge; same as the chip with CTRL.PDM_EDGE = 0)
+;   SEL = 3V  : data driven while CLK is high -> pdm_fall (just before the falling edge, PDM_EDGE = 1)
+; Each sample is taken one PIO cycle (~244 ns) before the edge: the mic drives the data within
+; 18 ns of the edge that starts its phase and releases it 16 ns after the edge that ends it.
+
+.program pdm_rise
+.side_set 1
+.wrap_target
+    nop         side 0
+    in pins, 1  side 0        ; low phase, ~244 ns before the rising edge
+    nop         side 1 [1]
+.wrap
+
+.program pdm_fall
+.side_set 1
+.wrap_target
+    nop         side 0 [1]
+    nop         side 1
+    in pins, 1  side 1        ; high phase, ~244 ns before the falling edge
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+// cfg: pdm_rise_program_get_default_config(offset) or pdm_fall_program_get_default_config(offset)
+// returns the PDM bit rate actually achieved (fractional divider)
+static inline float pdm_mic_program_init(PIO pio, uint sm, uint offset, pio_sm_config cfg,
+                                         uint clk_pin, uint dat_pin, float f_pdm) {
+    pio_sm_set_enabled(pio, sm, false);
+    pio_gpio_init(pio, clk_pin);
+    pio_gpio_init(pio, dat_pin);
+    gpio_pull_down(dat_pin);                          // wrong phase / no mic -> reads 0 (steady)
+    pio_sm_set_consecutive_pindirs(pio, sm, clk_pin, 1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, dat_pin, 1, false);
+    sm_config_set_sideset_pins(&cfg, clk_pin);
+    sm_config_set_in_pins(&cfg, dat_pin);
+    sm_config_set_in_shift(&cfg, false, true, 32);    // shift left, autopush every 32 bits
+    sm_config_set_fifo_join(&cfg, PIO_FIFO_JOIN_RX);  // 8-word RX FIFO
+    float div = (float)clock_get_hz(clk_sys) / (4.0f * f_pdm);
+    sm_config_set_clkdiv(&cfg, div);
+    pio_sm_init(pio, sm, offset, &cfg);
+    pio_sm_set_pins_with_mask(pio, sm, 0, 1u << clk_pin);
+    // actual rate after the 16.8 fixed-point divider
+    uint32_t d256 = (uint32_t)(div * 256.0f);
+    return (float)clock_get_hz(clk_sys) * 256.0f / (float)d256 / 4.0f;
+}
+%}
