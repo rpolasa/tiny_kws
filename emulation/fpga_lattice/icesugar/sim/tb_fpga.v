@@ -1,6 +1,6 @@
 /*
  * tb_fpga - co-simulation of the FPGA build (top_icesugar + unchanged chip RTL) with the Pico 2 W
- * PSRAM emulator. The Pico side (PIO state machines executing the assembled qspi_psram.pio
+ * Tiny Tapeout QSPI Pmod emulator (flash CS0, PSRAM A CS1, PSRAM B CS2; r15). The Pico side (PIO state machines executing the assembled qspi_psram.pio
  * opcodes, DMA re-arm, core-1 server) is modelled in Python (pio_model.py) and drives pico_sd_*.
  * Board delays: FPGA pad -> Pico pin T_F2P, Pico pin -> FPGA flip-flop T_P2F.
  */
@@ -34,10 +34,13 @@ module tb_fpga #(
 
     // what the Pico pins see
     wire [3:0] p_sd;
-    wire       p_sck, p_cs;
+    wire       p_sck, p_cs0, p_cs1, p_cs2, p_csall;
     assign #(T_F2P) p_sd  = {uio[5], uio[4], uio[2], uio[1]};
     assign #(T_F2P) p_sck = (uio[3] === 1'bz) ? 1'b0 : uio[3];   // Pico GP14 pull-down
-    assign #(T_F2P) p_cs  = (uio[7] === 1'bz) ? 1'b1 : uio[7];   // Pico GP15 pull-up
+    assign #(T_F2P) p_cs0 = (uio[0] === 1'bz) ? 1'b1 : uio[0];   // Pico GP7 pull-up (flash)
+    assign #(T_F2P) p_cs1 = (uio[6] === 1'bz) ? 1'b1 : uio[6];   // Pico GP8 pull-up (PSRAM A)
+    assign #(T_F2P) p_cs2 = (uio[7] === 1'bz) ? 1'b1 : uio[7];   // Pico GP9 pull-up (PSRAM B)
+    assign p_csall = p_cs0 & p_cs1 & p_cs2;                      // testbench only: "no transaction"
 
     top_icesugar dut (
         .clk_12m(clk), .pdm_dat(pdm_dat), .pdm_clk(pdm_clk),

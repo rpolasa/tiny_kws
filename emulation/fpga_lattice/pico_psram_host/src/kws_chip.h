@@ -13,7 +13,6 @@
 #define PIN_DETECT     20      /* chip uo[2] */
 #define PIN_FRAME      21      /* chip uo[3] */
 #define PIN_CHIP_RSTN  22      /* FPGA pin 21 (host_rst_n) */
-#define PIN_CS1_MON    8       /* chip uio[6] CS1 (RAM A): should stay high */
 #define SPI_HZ         1000000 /* f_clk/8 = 2.04 MHz at 16.3125 MHz: keep well below */
 
 enum { R_CTRL = 0x00, R_PDMDIV, R_MEMCFG, R_BURST, R_BASE0, R_BASE1, R_BASE2, R_THR, R_DETCFG,

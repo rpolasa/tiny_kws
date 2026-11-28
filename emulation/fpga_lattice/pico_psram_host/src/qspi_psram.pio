@@ -1,69 +1,81 @@
-; QSPI PSRAM emulation for the tiny_kws chip (src/kws_qspi.v) on a Pico 2 W.
-; Pins (all programs use in_base = SD0 = GP10):  pin 0..3 = SD0..SD3, pin 4 = SCK, pin 5 = CS2.
+; Tiny Tapeout QSPI Pmod emulation for the tiny_kws chip (src/kws_qspi.v) on a Pico 2 W:
+; W25Q128 flash on CS0, APS6404L PSRAM A on CS1 and PSRAM B on CS2 (r15).
+; Pins: CS0 GP7, CS1 GP8, CS2 GP9 (consecutive: one 'mov x, pins' with IN_COUNT 3 sees all three),
+;       SD0..SD3 GP10..GP13, SCK GP14.
 ;
-; Transactions issued by the chip (SCK idles low, data on SD changes after SCK falling edges):
+; Transactions issued by the chip (one CS low at a time, SCK idles low, SD changes after SCK falls):
 ;   read : CS low | 0xEB on SD0, 8 rising edges | addr[23:0] 6 nibbles | mode 2 | dummy 4 | data...
 ;          the memory drives nibble k after the falling edge of rising edge 20+k (high nibble first)
-;   write: CS low | 0x38 on SD0, 8 rising edges | addr 6 nibbles | data 2 nibbles | CS high
-; Reads may be cut short at any point (the chip ends the model stream mid-burst), so every
-; CS rising edge (held >= ~100 ns) re-arms qspi_rx and qspi_tx: qspi_cs (on PIO1) pushes a
-; 'jmp start' opcode and a DMA channel writes it into the target state machine's INSTR register
-; on PIO0 (no CPU in the loop).
+;   write: CS2 low | 0x38 on SD0, 8 rising edges | addr 6 nibbles | data 2 nibbles | CS high
+; Start of a transaction: qspi_csdet (PIO0) sees a CS fall and raises IRQ 4 -> qspi_rx starts;
+; qspi_rx raises IRQ 5 after the 16th rising edge -> qspi_tx counts the 4 dummy edges.
+; End: reads may be cut short at any point (the chip ends the model stream mid-burst), so when all
+; three CS have been high for ~95 ns qspi_cs (PIO1) pushes a 'jmp start' opcode and a DMA channel
+; writes it into qspi_rx's / qspi_tx's INSTR register on PIO0 (no CPU in the loop).
+; Core 1 tells the three memories apart by reading the CS pins while the transaction is running.
+;
+; SCK hold-off (r13): the Pico sees extra SCK edges on the bench - the 4 SD wires switching right
+; after a falling edge couple into SCK - so each wait on an SCK edge is followed by a hold-off of H
+; cycles (the [delay] of the instructions at the public 'h_*' labels, rewritten at run time by
+; psram_set_holdoff(); 0 = off).  The [0] below are placeholders for that patch.
 
-; SCK deglitch (r13): the Pico 2 W sees extra SCK edges on the bench - the 4 SD wires switching
-; right after a falling edge couple into SCK (shared ground / ribbon crosstalk), the data SM took the
-; spike for a new falling edge and ran ahead, so the chip captured shifted weights.  Each wait on an SCK
-; edge is now followed by a hold-off: the SM ignores SCK for H cycles after it saw an edge (and after it
-; switched the SD pins itself).  H is the [delay] of the instructions at the public 'h_*' labels;
-; psram_set_holdoff() rewrites it at run time to fit the SCK half period (0 = the r12 behaviour).
-; The [0] below are only placeholders for that patch.
+; ---------------------------------------------------------------- CS fall detector (PIO0)
+; in_base = CS0 (GP7), IN_COUNT = 3 (RP2350): 'mov x, pins' = CS2:CS1:CS0, 7 when all are high.
+; Y = 7 (set by the firmware).  IRQ 4 is set once per transaction, when the first CS goes low.
+.program qspi_csdet
+public start:
+hi:
+    mov x, pins
+    jmp x!=y hi                ; wait until all three CS are high
+.wrap_target
+    mov x, pins
+    jmp x!=y fire              ; a CS went low
+.wrap
+fire:
+    irq set 4
+    jmp hi
 
 ; ---------------------------------------------------------------- command + address receiver
-; shift left, autopush 32: word 1 = cmd << 24 | addr, then an explicit push of the next two
-; nibbles (write data for 0x38; mode bits, ignored, for 0xEB).
+; in_base = SD0, shift left, autopush 32.  16 nibbles per transaction: word 1 = the 8 command
+; nibbles (command bit k = bit 0 of nibble k, SD0), word 2 = addr[23:0] << 8 | the next 2 nibbles
+; (write data for 0x38, mode bits for 0xEB).  The first edge is taken without the hold-off: the
+; IRQ arrives only ~5 cycles before the first rising edge at SCK = 8 MHz.
 .program qspi_rx
 public start:
     mov isr, null              ; clears the shift count too
-    wait 0 pin 5               ; CS low
-    set x, 7
-cmd:
+    set x, 15
+    wait 1 irq 4               ; qspi_csdet: a CS went low
+    jmp first
+nib:
 public h_r0:
     wait 0 pin 4        [0]    ; SCK low, then hold-off (a spike right after the fall is not a rise)
+first:
     wait 1 pin 4               ; SCK rising
 public h_r1:
-    in pins, 1          [0]    ; command bit on SD0, then hold-off (ringing after the rise is not a fall)
-    jmp x-- cmd
-    set x, 7                   ; 6 address nibbles + 2 data/mode nibbles
-adr:
-public h_r2:
-    wait 0 pin 4        [0]
-    wait 1 pin 4
-public h_r3:
-    in pins, 4          [0]    ; autopush after the 6th address nibble
-    jmp x-- adr
-    push block                 ; the 2 nibbles after the address
-    wait 1 irq 7               ; park (IRQ 7 is never set) until the filtered CS-high re-arm jumps to start;
-                               ; waiting on the CS pin here would let a CS glitch restart decoding mid-burst
+    in pins, 4          [0]    ; then hold-off (ringing after the rise is not a fall)
+    jmp x-- nib
+    irq set 5                  ; 16 edges seen: start qspi_tx for the 4 dummy edges
+    wait 1 irq 7               ; park (IRQ 7 is never set) until the end-of-transaction re-arm jumps to
+                               ; start.  IRQ 4 stays set until consumed, so a re-arm that lands after the
+                               ; next CS fall (but before its first rising edge) still catches it.
 
 ; ---------------------------------------------------------------- read data driver
 ; out/set base = SD0 (4 pins), shift left (high nibble first), NO autopull: an explicit 'pull block' for
 ; every 8 nibbles. (With autopull on, PULL is a no-op while the OSR is full - RP2040/RP2350 datasheet,
-; PULL - so after 'mov osr, null' the first word would never be loaded and the bus would read 0000.)
-; Releases the bus at start, counts 20 rising edges, then drives one nibble after every falling edge
-; from the words core 1 queued while the address was arriving.  (r13: 'set pindirs' instead of
-; side-set, so every instruction has the 5 delay bits for the hold-off.)
+; PULL.)  Releases the bus at start, waits for qspi_rx (edge 16), counts edges 17..20, then drives
+; one nibble after every falling edge from the words core 1 queued while the address was arriving.
 .program qspi_tx
 public start:
-    mov osr, null
     set pindirs, 0                 ; SD0..3 input
-    wait 0 pin 5
-    set x, 19
+    set x, 3
+    wait 1 irq 5                   ; qspi_rx has seen 16 rising edges
 cnt:
 public h_t0:
     wait 0 pin 4        [0]
 public h_t1:
     wait 1 pin 4        [0]
-    jmp x-- cnt                    ; 20 rising edges: cmd 8 + addr 6 + mode 2 + dummy 4
+    jmp x-- cnt                    ; rising edges 17..20 (mode 2 + dummy 4 = edges 15..20)
+.wrap_target
 word:
     pull block                     ; next data word (stalls only if core 1 is late)
     set y, 7
@@ -75,43 +87,53 @@ public h_t2:
 public h_t3:
     wait 1 pin 4        [0]        ; rise, hold-off: ringing after it must not count as a fall
     jmp y-- nib
-    jmp word
+.wrap
 
-; ---------------------------------------------------------------- CS rising-edge watcher (runs on PIO1)
-; X holds the opcode to inject (a jmp to the target's start). One instance per target.
-; Glitch filter: CS must stay high for 8 checks (16 cycles, ~107 ns at 150 MHz) before the target
-; is re-armed - a crosstalk spike on CS during a transaction must not restart qspi_rx / qspi_tx.
-; jmp_pin = CS2.
+; ---------------------------------------------------------------- end-of-transaction watcher (PIO1)
+; in_base = CS0, IN_COUNT = 3, Y = 7, OSR = the opcode to inject (a jmp to the target's start).
+; One instance per target.  Glitch filter: all three CS must read high at three samples 7 cycles
+; apart (~95 ns at 150 MHz) - a spike on a CS wire mid-transaction must not restart rx / tx.  The
+; re-arm must land before the first rising edge of the next transaction (CS high gap + 1 SCK half
+; period = 5 clk = 306 ns at SCK 8 MHz): filter ~16 cycles + DMA.
 .program qspi_cs
 .wrap_target
-idle:
-    wait 0 pin 5
-    wait 1 pin 5
-    set y, 7
-hold:
-    jmp pin still              ; still high?
-    jmp idle                   ; back low within ~100 ns: a glitch, ignore it
-still:
-    jmp y-- hold
-    mov isr, x
+lo:
+    mov x, pins
+    jmp x!=y busy                  ; a transaction is running
+    jmp lo
+busy:
+    mov x, pins
+    jmp x!=y busy                  ; wait until all three CS are high
+    nop                 [4]
+    mov x, pins
+    jmp x!=y busy                  ; low again: a glitch, keep waiting
+    nop                 [4]
+    mov x, pins
+    jmp x!=y busy
+    mov isr, osr
     push noblock
 .wrap
 
 ; ---------------------------------------------------------------- raw CS rising-edge counter (diagnostic, PIO1)
-; no filter: counts every CS rise, glitches included (one RX FIFO word per rise)
+; no filter: counts every rise of the three CS together (all high again), glitches included
 .program qspi_csraw
 .wrap_target
-    wait 0 pin 5
-    wait 1 pin 5
+lo:
+    mov x, pins
+    jmp x!=y hi
+    jmp lo
+hi:
+    mov x, pins
+    jmp x!=y hi
     push noblock
 .wrap
 
-; ---------------------------------------------------------------- bus sniffer (diagnostic, runs on PIO1)
-; in_base = SD0: one sample of GP10..GP17 (SD0..SD3, SCK, CS2, ...) per SCK rising edge, autopush 8.
+; ---------------------------------------------------------------- bus sniffer (diagnostic, PIO1)
+; in_base = CS0 (GP7): one sample of GP7..GP14 = CS0 CS1 CS2 SD0 SD1 SD2 SD3 SCK per SCK rising
+; edge from the moment it is armed, autopush 8.
 .program qspi_sniff
-    wait 0 pin 5
 .wrap_target
-    wait 1 pin 4
+    wait 1 pin 7
     in pins, 8
-    wait 0 pin 4
+    wait 0 pin 7
 .wrap

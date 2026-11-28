@@ -1,16 +1,16 @@
-# tiny_kws FPGA emulation: iCESugar v1.5 + Pico 2 W as PSRAM
+# tiny_kws FPGA emulation: iCESugar v1.5 + Pico 2 W as the Tiny Tapeout QSPI Pmod
 
 The chip's RTL (`tt_um_rakesh_tiny_kws`, rev B, unchanged) runs on the iCE40UP5K. A Pico 2 W does two jobs:
-- **PSRAM:** it emulates the QSPI PSRAM on the chip's real uio pins.
+- **QSPI Pmod (r15):** on the chip's real uio pins it emulates all three memories of the Tiny Tapeout QSPI Pmod: the W25Q128 flash on CS0, PSRAM A on CS1 and PSRAM B on CS2. (Up to r14 it emulated PSRAM B only.)
 - **Board-B host:** it configures the chip over SPI, runs the golden-vector tests and prints results over USB.
 
 The FPGA's uio connector uses the Tiny Tapeout QSPI-Pmod pin order, so a real TT QSPI Pmod can replace the Pico later.
 
 ```
  PDM mic ──► iCESugar v1.5: PLL 12 → 16.3125 MHz, tt_um_rakesh_tiny_kws
-               PMOD3: PDM, SPI slave, DETECT, FRAME      PMOD2: uio[7:0] QSPI (CS2, SCK, SD0-3)
+               PMOD3: PDM, SPI slave, DETECT, FRAME      PMOD2: uio[7:0] QSPI (CS0-2, SCK, SD0-3)
                          │ SPI (registers)                      │ QSPI
-               Pico 2 W: core 0 = USB console + SPI host + tests │ core 1 + PIO0 + DMA = PSRAM B
+               Pico 2 W: core 0 = USB console + SPI host + tests │ core 1 + PIO0/PIO1 + DMA = flash + PSRAM A + PSRAM B
 ```
 
 | Folder | What |
@@ -40,14 +40,14 @@ Short wires (< 10 cm) and a **common GND**. Power each board from its own USB an
 
 | Signal | Chip pin | iCESugar header pin (FPGA pin) | Pico 2 W |
 |---|---|---|---|
-| CS0 flash | uio[0] | PMOD2 pin 1 (FPGA 46) | not connected |
+| CS0 flash | uio[0] | PMOD2 pin 1 (FPGA 46) | **GP7** (new in r15) |
 | SD0 | uio[1] | PMOD2 pin 2 (FPGA 44) | GP10 |
 | SD1 | uio[2] | PMOD2 pin 3 (FPGA 42) | GP11 |
 | QSPI SCK | uio[3] | PMOD2 pin 4 (FPGA 37) | GP14 |
 | SD2 | uio[4] | PMOD2 pin 12 (FPGA 45) | GP12 |
 | SD3 | uio[5] | PMOD2 pin 11 (FPGA 43) | GP13 |
-| CS1 RAM A | uio[6] | PMOD2 pin 10 (FPGA 38) | GP8 (monitor only: must stay high) |
-| CS2 RAM B | uio[7] | PMOD2 pin 9 (FPGA 36) | GP15 |
+| CS1 RAM A | uio[6] | PMOD2 pin 10 (FPGA 38) | GP8 |
+| CS2 RAM B | uio[7] | PMOD2 pin 9 (FPGA 36) | **GP9** (r15; was GP15 up to r14) |
 | PDM_DAT | ui[0] | 34 (P3_1) | mic DAT |
 | PDM_CLK | uo[0] | 31 (P3_2) | mic CLK |
 | SPI SCK | ui[1] | 27 (P3_3) | GP18 |
@@ -63,6 +63,7 @@ Short wires (< 10 cm) and a **common GND**. Power each board from its own USB an
 - **Mic:** 3V and GND from a PMOD3 power pin; **SEL to GND**.
 - **Header pin numbering (iCESugar v1.5 schematic):** each PMOD has signal pins 1-4 on one row and 12, 11, 10, 9 on the other, with **pin 12 opposite pin 1** and pin 9 opposite pin 4. Pins 5 and 8 are GND, 6 and 7 are 3V3. A standard 12-pin Pmod numbers that second row 7-10 (pin 7 opposite pin 1), so the TT QSPI Pmod's uio[4..7] land on iCESugar pins 12, 11, 10, 9; the pcf is set up that way.
 - **Wire length:** keep the QSPI wires short (< 10-15 cm), keep SCK away from the SD lines in a ribbon, and run at least two GND wires between the boards (one next to the QSPI bundle).
+- **r15 wiring change from r14:** add CS0 (PMOD2 pin 1) → GP7 and move CS2 (PMOD2 pin 9) from GP15 to GP9. GP15 is then unused. The three CS lines must sit on consecutive Pico pins, GP7, GP8 and GP9: one PIO read sees all three. Firmware r14 and older still expects CS2 on GP15.
 - **DIP switch 1 must be OFF.** It shares FPGA pin 21 (reset) and would hold the chip in reset.
 - **PMOD1:** use only the four DET_CLASS pins. Its other pins are shared with the iCELink USB and UART.
 
@@ -72,7 +73,11 @@ Short wires (< 10 cm) and a **common GND**. Power each board from its own USB an
 - **Green:** detection.
 
 ## 3. Chip set-up used here
-- **Model location:** model blob (10,412 B, md5 `e838370dc00e61f07f49e6c1cb506bd1`) at **PSRAM B 0x000000**, next to the chip's h′ scratch at 0x7FFF00. So **MEMCFG.cs = 2**: the Pico emulates one PSRAM on one chip-select. Model-in-RAM-B is a supported configuration (cocotb `test_03`); on the real board it is the same register field.
+- **Model location (r15):** the model blob (10,412 B, md5 `e838370dc00e61f07f49e6c1cb506bd1`) sits at 0x000000 of the memory selected by MEMCFG.cs.
+  - The default is **flash (CS0)**, as on a real board. Press `c` to switch to PSRAM A (CS1) or PSRAM B (CS2); press `a` to run F3 with each of the three.
+  - The other two model windows are blanked (flash 0xFF, PSRAM 0x00), so a stream from the wrong chip select fails.
+  - The chip always keeps its h′ scratch at PSRAM B 0x7FFF00 (CS2).
+- **Burst lengths:** flash bursts go up to 128 B (`b` cycles BURST 8 to 128 B). The chip caps PSRAM bursts at 32 B.
 - **Clock:** 16.3125 MHz (PLL DIVR 0, DIVF 86, DIVQ 6).
 - **PDM:** PDM_DIV 7 gives PDM_CLK 1.0195 MHz and fs 15.93 kHz (−0.44 %).
 - **SPI host:** 1 MHz (limit f_clk/8 = 2.04 MHz).
@@ -87,14 +92,14 @@ Short wires (< 10 cm) and a **common GND**. Power each board from its own USB an
 |---|---|---|
 | F0 | Program `kws.bin` with no wires attached | red LED on |
 | F1 | Wire SPI, rst_n and GND; flash `kws_fpga_host.uf2`; open the serial monitor (or press `1`) | `F1 registers: ID 0x4b H 48 NCH 16 MEMCFG 0x49 ... PASS` |
-| F2 | Wire the QSPI lines; press `d` (wiring diagnostic, runs automatically if F3 fails at boot) | first word `eb001248`, every FPGA SD line reported `ok` on its own GPIO, `hold-off on ... result bit-exact` in the A/B lines |
-| F3 | `3`: golden features → NN, all 12 clips | `F3 ... 372 frames, 0 mismatches ... PASS (bit-exact)` |
+| F2 | Wire the QSPI lines; press `d` (wiring diagnostic, runs automatically if F3 fails at boot) | first word `eb001248` on the model CS; every FPGA SD line reported `ok` on its own GPIO; `hold-off on ... result bit-exact` in the A/B lines; all three `chip selects` lines `ok` |
+| F3 | `3`: golden features → NN, all 12 clips, model in the selected memory; `a`: the same with flash, PSRAM A and PSRAM B in turn | `F3 ... 372 frames, 0 mismatches ... PASS (bit-exact)` for each; `F3 on all three chip selects: PASS` |
 | F3b | `w`: read-window sweep at SCK div 7, 4, 2, 1 | the pass/fail map matches section 3; on the bench the window may shift by one step, since Pico pad delays are estimates |
 | F4 | `4`: golden PCM → front end → NN, 4 clips | `F4 ... features bit-exact, NN bit-exact -> PASS` |
 | F5 | Mic on PMOD3; `l` for live | `>>> DETECT yes ...`, green LED; compare with the MCU-only kws_pico; tune `+`/`-` THR and `]`/`[` N |
 | F6 | Leave live running for 1 h, then `s` | STATUS without OVERRUN/MODEL_ERR, data late "no", bad cmd 0 |
 
-The Pico runs F1 and F3 automatically at boot and prints the result.
+At boot the Pico runs F1, then F3 three times (flash, PSRAM A, PSRAM B), and prints the results.
 
 ## 5. What has been verified (before hardware)
 - **FPGA build:** yosys + nextpnr-ice40.
@@ -118,13 +123,39 @@ The Pico runs F1 and F3 automatically at boot and prints the result.
     - At div 2 and div 1 this is the same window the co-sim predicted in section 3, so the presets (div 2 / rd 1 and div 1 / rd 0) both sit inside it.
   - **Bench F4 and F5 (r13):** F4 passed: 124 frames, with features and NN both bit-exact. In F5 (live mic), detection accuracy was the same as the MCU-only kws_pico.
   - Wiring helps as well: use short wires, run a GND wire next to SCK, and connect several GND pins between the boards.
+- **QSPI Pmod emulation (r15, 2026-11-25; bench 2026-11-28):**
+  - **Bench, after the rewire (CS0 → GP7, CS2 moved from GP15 to GP9), `d` PASSED:**
+    - all three CS read high while the bus is released;
+    - the first read was on flash (CS0) as expected;
+    - the full bus check found 0 mismatches over 2189 model bytes in spike-free reads.
+    - **Chip-select check:**
+
+      | Model in | Reads CS0/CS1/CS2 | Frame |
+      |---|---|---|
+      | CS0 (flash) | 327/0/2 | bit-exact |
+      | CS1 (PSRAM A) | 0/327/2 | bit-exact |
+      | CS2 (PSRAM B) | 0/0/329 | bit-exact |
+
+      In every case all 48 writes went to CS2.
+    - **SCK hold-off A/B:** off gives a wrong result, on gives a bit-exact one (about 460 SCK spikes seen per frame).
+    - Bench result reported: "still working with r15 after the wire changes".
+  - The Pico serves flash (CS0), PSRAM A (CS1) and PSRAM B (CS2) the way the TT QSPI Pmod does.
+  - PIO0 `qspi_csdet` watches the three CS pins as one 3-bit value (RP2350 IN_COUNT = 3) and raises IRQ 4 when one falls. `qspi_rx` then reads 16 nibbles: 8 command nibbles + address + 2 nibbles. After the 16th edge it raises IRQ 5, which starts `qspi_tx` for the 4 dummy edges.
+  - The PIO1 watchers re-arm rx/tx when all three CS have been high for ~95 ns. Because IRQ 4 stays pending, a late re-arm still catches the next transaction.
+  - Core 1 reads the CS pins when the command word arrives (the transaction is still running) to pick the memory. It streams flash bursts of up to 128 B through the 8-word FIFO, and drops the rest of a burst when the chip cuts it short.
+  - `sim/glitch_sim.py` mixes reads on all three CS (each memory holds different data), cut bursts and h′ writes. Result: 0 wrong nibbles at div 7, 2 and 1 (rd 0/1) with and without SCK spikes (hold-off on). Each read was served by the right memory, no writes were lost, and there were no bad commands. This still holds with DMA 2.5× and core 1 3–6× slower than nominal.
+  - **Full RTL co-sim:** every frame is bit-exact, with no bus contention, no late data, no bad commands and no bad CS:
+    - **Model in flash, PSRAM A or PSRAM B,** at div 2 / rd 1 (7.27 ms per frame) and div 1 / rd 0 (3.79 ms). The model is read only on its CS; CS2 also serves the 2 h′ read-backs per frame and takes all 48 writes.
+    - **Flash with 128 B bursts** plus about 870 injected SCK spikes per case: 5.93 ms per frame at div 2, 3.04 ms at div 1.
+    - **CS spikes on every transaction** with DMA 2.5× and core 1 3× slower than nominal: flash and PSRAM B both pass.
 - **Remaining hardware assumption:** a DMA write to `SMx_INSTR` preempts a state machine stalled on `wait`. The PIO register description says a write "executes an instruction immediately (including jumps) and then resume[s] execution". F2 and F3 confirm it on the bench: every transaction after the first depends on it.
 
 ## 6. If something fails
 | Symptom | Check |
 |---|---|
 | F1 ID reads 0x00 or 0xFF | SPI wiring (MISO ↔ GP16), GND, DIP SW1 off, red LED on |
-| F3 MODEL_ERR, PSRAM reads = 0 | QSPI wiring, CS2 on GP15, SCK on GP14 |
+| F3 MODEL_ERR, PSRAM reads = 0 | QSPI wiring: CS0 → GP7, CS1 → GP8, CS2 → GP9 (r15), SCK on GP14 |
+| F3 passes for one memory but not another | that memory's CS wire (`d` → `chip selects` lines) |
 | F3 wrong results, `d` reports extra SCK edges | SCK crosstalk: keep the hold-off on (`g`), shorten wires, add GND wires (one next to SCK) |
 | F3 MODEL_ERR, reads > 0 | press `d`: it names any SD line that is open, swapped or shorted. If `d` passes, run `w`: ok only at slow speeds means signal integrity (shorter wires, more GND) |
 | data late "YES" | core 1 is too slow: build with `-DSYS_KHZ=200000` (Pico at 200 MHz) or use the div 2 preset |

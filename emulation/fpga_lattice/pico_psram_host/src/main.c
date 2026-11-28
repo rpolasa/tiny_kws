@@ -1,18 +1,23 @@
 /* kws_fpga_host - Pico 2 W companion for the tiny_kws FPGA emulation on an iCESugar v1.5.
  *
- *   core 1 + PIO0 + DMA : QSPI PSRAM B emulation on the chip's uio pins (psram_emu.c)
- *   core 0              : board-B host - SPI register access, golden-vector tests, live mode, USB console
+ *   core 1 + PIO0/PIO1 + DMA : Tiny Tapeout QSPI Pmod emulation on the chip's uio pins (psram_emu.c):
+ *                              flash on CS0, PSRAM A on CS1, PSRAM B on CS2 (r15)
+ *   core 0                   : board-B host - SPI register access, golden-vector tests, live mode, USB console
  *
- * The model blob (model/deploy/model.bin) is placed in the emulated PSRAM B at 0x000000; the chip is
- * configured with MEMCFG.cs = 2, so the model stream and the h' scratch (0x7FFF00) share CS2.
+ * The model blob (model/deploy/model.bin) is placed at 0x000000 of the memory selected with 'c'
+ * (MEMCFG.cs: 0 flash - the default, as on a real board - 1 PSRAM A, 2 PSRAM B); the other two model
+ * windows are blanked so a stream from the wrong chip select fails.  The chip always writes and reads
+ * back its h' scratch at PSRAM B 0x7FFF00 (CS2).
  *
  * Pico 2 W pins                         iCESugar (FPGA pin)        chip pin
  *   (iCESugar header numbering: PMOD2 pins 1-4 top row, 12-9 bottom row with 12 opposite 1)
+ *   GP7         CS0 (flash)             PMOD2 pin 1 (46)           uio[0]
+ *   GP8         CS1 (PSRAM A)           PMOD2 pin 10 (38)          uio[6]
+ *   GP9         CS2 (PSRAM B)           PMOD2 pin 9 (36)           uio[7]
  *   GP10, GP11  SD0, SD1                PMOD2 pin 2 (44), 3 (42)   uio[1], uio[2]
  *   GP12, GP13  SD2, SD3                PMOD2 pin 12 (45), 11 (43) uio[4], uio[5]
  *   GP14        QSPI SCK                PMOD2 pin 4 (37)           uio[3]
- *   GP15        CS2 (RAM B)             PMOD2 pin 9 (36)           uio[7]
- *   GP8         CS1 monitor             PMOD2 pin 10 (38)          uio[6]
+ *   GP15        not used (was CS2 up to r14: move that wire to GP9)
  *   GP16..GP19  SPI0 MISO CSn SCK MOSI  PMOD3 26,23,27,25          uo[1], ui[3], ui[1], ui[2]
  *   GP20 DETECT, GP21 FRAME             PMOD3 28,32                uo[2], uo[3]
  *   GP22        chip reset (active low) PMOD4 21                   rst_n
@@ -33,7 +38,7 @@
 #include "gen/kws_golden_m1.h"
 #include "gen/kws_golden_m2.h"
 
-#define FW_TAG "kws_fpga_host 2026-11-23 r14"
+#define FW_TAG "kws_fpga_host 2026-11-25 r15"
 
 #ifndef SYS_KHZ
 #define SYS_KHZ 150000               /* raise (e.g. 200000) for more PSRAM timing margin */
@@ -51,10 +56,18 @@ static int cfg_thr = 12, cfg_n = 4, cfg_nfill = 2, cfg_pdmdiv = 7, cfg_edge = 0;
 static bool wifi_ok, live, verbose;
 static uint32_t last_nn_us;
 static bool holdoff_on = true;       /* 'g': SCK hold-off (r13 fix) on/off; off = the r12 PIO behaviour */
+static int model_cs = MEM_FLASH;     /* 'c': memory holding the model (MEMCFG.cs) */
+
+/* the model at 'base' in the model_cs memory only; the other model windows blanked (flash erased = FF) */
+static void model_install(uint32_t base) {
+    for (int d = 0; d < MEM_N; d++) mem_fill(d, d == MEM_FLASH ? 0xFF : 0x00);
+    mem_load(model_cs, base, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
+}
 
 static void chip_config(int div, int rd) {
     psram_set_holdoff(holdoff_on ? psram_holdoff_for_div(div, SYS_KHZ) : 0);   /* chip is in reset: bus idle */
-    chip_wr1(R_MEMCFG, (uint8_t)memcfg_of(rd, div, 2));     /* model and scratch in PSRAM B (CS2) */
+    psram_rearm();
+    chip_wr1(R_MEMCFG, (uint8_t)memcfg_of(rd, div, model_cs));  /* model in model_cs, h' scratch in PSRAM B */
     chip_wr1(R_BURST, (uint8_t)cfg_burst);
     psram_burst = (uint8_t)cfg_burst;
     uint8_t base[3] = {0, 0, 0};
@@ -69,13 +82,16 @@ static void led(bool on) { if (wifi_ok) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PI
 static void print_status(void) {
     uint8_t st = chip_rd1(R_STATUS), fc[2];
     chip_rd(R_FCNT0, fc, 2);
-    printf("chip: STATUS 0x%02x%s%s%s  frames %u | PSRAM: %lu reads (%lu B), %lu writes, %lu stale flushes,"
-           " %lu bad cmd, %lu out of range | CS1 %s | last NN %lu us | pins: FRAME ok %lu missed %lu, DETECT mismatch %lu\n",
+    printf("chip: STATUS 0x%02x%s%s%s  frames %u | Pmod: model in %s, %lu reads (CS0 %lu, CS1 %lu, CS2 %lu; %lu B), %lu writes"
+           " (%lu not on CS2), %lu stale flushes, %lu cut bursts, %lu bad cmd, %lu bad CS, %lu out of range | last NN %lu us"
+           " | pins: FRAME ok %lu missed %lu, DETECT mismatch %lu\n",
            st, st & S_OVERRUN ? " OVERRUN" : "", st & S_MODEL_ERR ? " MODEL_ERR" : "", st & S_DET ? " det" : "",
-           fc[0] | fc[1] << 8, (unsigned long)psram_stats.reads, (unsigned long)psram_stats.read_bytes,
-           (unsigned long)psram_stats.writes, (unsigned long)psram_stats.stale_flush,
-           (unsigned long)psram_stats.bad_cmd, (unsigned long)psram_stats.out_of_range,
-           gpio_get(PIN_CS1_MON) ? "high (ok)" : "LOW (unexpected)", (unsigned long)last_nn_us,
+           fc[0] | fc[1] << 8, mem_name[model_cs], (unsigned long)psram_stats.reads, (unsigned long)psram_stats.rd_dev[0],
+           (unsigned long)psram_stats.rd_dev[1], (unsigned long)psram_stats.rd_dev[2], (unsigned long)psram_stats.read_bytes,
+           (unsigned long)psram_stats.writes, (unsigned long)psram_stats.wr_not_ramb, (unsigned long)psram_stats.stale_flush,
+           (unsigned long)(psram_stats.burst_abort + psram_stats.hdr_abort),
+           (unsigned long)psram_stats.bad_cmd, (unsigned long)psram_stats.cs_bad, (unsigned long)psram_stats.out_of_range,
+           (unsigned long)last_nn_us,
            (unsigned long)chip_frame_pin_ok, (unsigned long)chip_frame_pin_missed, (unsigned long)chip_det_pin_mismatch);
 }
 
@@ -95,7 +111,7 @@ static int test_regs(void) {
 
 /* ---------------------------------------------------------------- F3: host features -> NN (model via PSRAM) */
 static int test_feat(int nclips, int div, int rd, bool quiet) {
-    psram_load(0, KWS_MODEL_BLOB, KWS_MODEL_BYTES);          /* model at 0 (the 'd' diagnostic moves it) */
+    model_install(0);                                         /* model at 0 (the 'd' diagnostic moves it) */
     chip_reset();
     chip_config(div, rd);
     chip_wr1(R_THR, M1_THR);
@@ -134,14 +150,25 @@ done:;
     if (st & (S_OVERRUN | S_MODEL_ERR)) bad++;
     chip_wr1(R_CTRL, 0);
     last_nn_us = frames ? nn_sum / frames : 0;
+    /* the model stream must come from model_cs only; PSRAM B also serves the h' read-back */
+    int stray = 0;
+    for (int d = 0; d < MEM_N; d++) if (d != model_cs && d != MEM_RAMB) stray += (int)psram_stats.rd_dev[d];
+    int csbad = stray || psram_stats.cs_bad || psram_stats.wr_not_ramb || !psram_stats.rd_dev[model_cs];
+    if (csbad) bad++;
     if (!quiet)
-        printf("F3 host features -> NN, model from Pico PSRAM (MEMCFG 0x%02x, SCK hold-off %u): %d frames, %d mismatches, STATUS 0x%02x,"
-               " frame latency %lu us avg / %lu max, PSRAM %lu reads %lu writes %lu stale %lu bad-cmd %lu out-of-range"
-               " -> %s\n",
-               memcfg_of(rd, div, 2), psram_holdoff(), frames, bad, st, (unsigned long)last_nn_us, (unsigned long)nn_max,
-               (unsigned long)psram_stats.reads, (unsigned long)psram_stats.writes,
-               (unsigned long)psram_stats.stale_flush, (unsigned long)psram_stats.bad_cmd,
-               (unsigned long)psram_stats.out_of_range, bad ? "FAIL" : "PASS (bit-exact)");
+        printf("F3 host features -> NN, model in %s (MEMCFG 0x%02x, SCK hold-off %u): %d frames, %d mismatches, STATUS 0x%02x,"
+               " frame latency %lu us avg / %lu max, reads CS0/CS1/CS2 %lu/%lu/%lu, %lu writes, %lu stale, %lu cut,"
+               " %lu bad-cmd, %lu bad-CS, %lu out-of-range -> %s\n",
+               mem_name[model_cs], memcfg_of(rd, div, model_cs), psram_holdoff(), frames, bad, st,
+               (unsigned long)last_nn_us, (unsigned long)nn_max,
+               (unsigned long)psram_stats.rd_dev[0], (unsigned long)psram_stats.rd_dev[1], (unsigned long)psram_stats.rd_dev[2],
+               (unsigned long)psram_stats.writes, (unsigned long)psram_stats.stale_flush,
+               (unsigned long)(psram_stats.burst_abort + psram_stats.hdr_abort), (unsigned long)psram_stats.bad_cmd,
+               (unsigned long)psram_stats.cs_bad, (unsigned long)psram_stats.out_of_range, bad ? "FAIL" : "PASS (bit-exact)");
+    if (!quiet && csbad)
+        printf("   -> chip-select routing wrong: %d reads from a memory that does not hold the model, %lu with no/several CS"
+               " low, %lu writes not on CS2%s\n", stray, (unsigned long)psram_stats.cs_bad,
+               (unsigned long)psram_stats.wr_not_ramb, psram_stats.rd_dev[model_cs] ? "" : ", NO reads on the model CS (check that CS wire)");
     if (!quiet) {
         printf("   pins: FRAME seen on %lu of %lu frames%s, DETECT pin disagreed with STATUS.det on %lu frames%s\n",
                (unsigned long)chip_frame_pin_ok, (unsigned long)(chip_frame_pin_ok + chip_frame_pin_missed),
@@ -151,10 +178,23 @@ done:;
     return bad;
 }
 
+/* F3 with the model in each of the three memories in turn (flash, PSRAM A, PSRAM B) */
+static int test_all_cs(int nclips) {
+    int saved = model_cs, bad = 0;
+    for (int d = 0; d < MEM_N; d++) {
+        model_cs = d;
+        bad += test_feat(nclips, PRESETS[preset].div, PRESETS[preset].rd, false) != 0;
+    }
+    model_cs = saved;
+    model_install(0);
+    printf("F3 on all three chip selects: %s\n", bad ? "FAIL" : "PASS (flash, PSRAM A and PSRAM B all bit-exact)");
+    return bad;
+}
+
 /* ---------------------------------------------------------------- F4: host PCM -> front end + NN */
 static int test_pcm(int nclips) {
     const memcfg_preset_t *p = &PRESETS[preset];
-    psram_load(0, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
+    model_install(0);
     chip_reset();
     chip_config(p->div, p->rd);
     psram_stats_clear();
@@ -195,7 +235,8 @@ done:;
     uint8_t st = chip_rd1(R_STATUS);
     if (st & (S_OVERRUN | S_MODEL_ERR)) bad++;
     chip_wr1(R_CTRL, 0);
-    printf("F4 host PCM -> front end -> NN: %d frames, features %s, NN %s, STATUS 0x%02x -> %s\n", frames,
+    printf("F4 host PCM -> front end -> NN (model in %s): %d frames, features %s, NN %s, STATUS 0x%02x -> %s\n",
+           mem_name[model_cs], frames,
            bad ? "MISMATCH" : "bit-exact", nnbad ? "MISMATCH" : "bit-exact", st, (bad || nnbad) ? "FAIL" : "PASS");
     return bad + nnbad;
 }
@@ -204,7 +245,8 @@ done:;
 static void sweep(void) {
     static const int divs[] = {7, 4, 2, 1};
     int okdiv[4] = {0, 0, 0, 0};
-    printf("QSPI read window (F3 on 1 clip for each setting; ok = 31 frames bit-exact):\n                          rd_dly:");
+    printf("QSPI read window, model in %s (F3 on 1 clip for each setting; ok = 31 frames bit-exact):\n"
+           "                          rd_dly:", mem_name[model_cs]);
     for (int rd = 0; rd < 8; rd++) printf("  %d   ", rd);
     printf("\n");
     for (unsigned i = 0; i < sizeof divs / sizeof divs[0]; i++) {
@@ -231,15 +273,14 @@ static void sweep(void) {
 typedef struct { uint32_t ntx, nwr, nbytes, nbad, extra, gtx, lost, first_extra, scratch_skipped; } walk_t;
 static void bus_walk(const uint8_t *sm, int ns, int show, walk_t *o) {
     memset(o, 0, sizeof *o);
-    #define SD(i) (sm[i] & 15)
+    #define SD(i) SNIFF_SD(sm[i])
     uint32_t nt = psram_trace_n < PSRAM_TRACE_N ? psram_trace_n : PSRAM_TRACE_N;
-    int32_t ppos = -1; uint32_t pw = 0, pos = 0;
+    int32_t ppos = -1; uint32_t pw = 0, pos = 0; int pdev = 0;
     int shown_x = 0, shown_b = 0;
     for (uint32_t t = 0; t <= nt; t++) {
         int32_t q = -1; uint32_t w = 0;
         if (t < nt) {
             w = psram_trace[t];
-            if ((w >> 24) == 0) continue;                              /* second word (write data / mode) */
             for (uint32_t s = pos; s + 14 <= (uint32_t)ns && s < pos + 2048; s++) {
                 uint32_t c = 0, a = 0;
                 for (int i = 0; i < 8; i++) c = (c << 1) | (SD(s + i) & 1);
@@ -260,7 +301,8 @@ static void bus_walk(const uint8_t *sm, int ns, int show, walk_t *o) {
             o->ntx++;
             if (c == 0x38) { o->nwr++; exp = 16; }
             else {
-                uint32_t b = psram_burst & 7u; if (b > 3) b = 3;
+                uint32_t bmax = pdev == MEM_FLASH ? 5u : 3u;
+                uint32_t b = psram_burst & 7u; if (b > bmax) b = bmax;
                 uint32_t blen = 4u << b, bcnt = blen - (a & (blen - 1u));
                 exp = 20 + 2 * bcnt - 1;
             }
@@ -274,20 +316,20 @@ static void bus_walk(const uint8_t *sm, int ns, int show, walk_t *o) {
             } else if (c == 0x38) {
                 if (n >= 16) {
                     uint8_t v = (uint8_t)((SD(ppos + 14) << 4) | SD(ppos + 15));
-                    if (psram_peek(a) != v) { o->nbad++; if (show && shown_b++ < 6) printf("  write 0x%06lx: bus %02x, memory %02x\n", (unsigned long)a, v, psram_peek(a)); }
+                    if (mem_peek(MEM_RAMB, a) != v) { o->nbad++; if (show && shown_b++ < 6) printf("  write 0x%06lx: bus %02x, memory %02x\n", (unsigned long)a, v, mem_peek(MEM_RAMB, a)); }
                 }
             } else if (a >= 0x7FFF00u) {
                 o->scratch_skipped++;      /* h' read-back: the chip rewrites these bytes later in the frame */
             } else {
                 for (uint32_t s = (uint32_t)ppos + 20, k = 0; s + 1 < end; s += 2, k++) {
-                    uint8_t v = (uint8_t)((SD(s) << 4) | SD(s + 1)), e = psram_peek(a + k);
+                    uint8_t v = (uint8_t)((SD(s) << 4) | SD(s + 1)), e = mem_peek(pdev, a + k);
                     o->nbytes++;
-                    if (v != e) { o->nbad++; if (show && shown_b++ < 6) printf("  read 0x%06lx (+%lu): bus %02x, memory %02x\n", (unsigned long)(a + k), (unsigned long)k, v, e); }
+                    if (v != e) { o->nbad++; if (show && shown_b++ < 6) printf("  read %s 0x%06lx (+%lu): bus %02x, memory %02x\n", mem_name[pdev], (unsigned long)(a + k), (unsigned long)k, v, e); }
                 }
             }
         }
         if (q < 0) break;
-        ppos = q; pw = w; pos = (uint32_t)q + 16;
+        ppos = q; pw = w; pos = (uint32_t)q + 16; pdev = psram_trace_dev[t] < MEM_N ? psram_trace_dev[t] : 0;
     }
     #undef SD
 }
@@ -299,10 +341,10 @@ static int hprime_diff(bool show) {
     kws_gru_reset(&g, &mdl);
     kws_gru_step(&g, &M1_FEAT[0]);
     int hb = 0;
-    for (int j = 0; j < mdl.H; j++) hb += (int8_t)psram_peek(0x7FFF00 + j) != g.h[j];
+    for (int j = 0; j < mdl.H; j++) hb += (int8_t)mem_peek(MEM_RAMB, MEM_SCRATCH + j) != g.h[j];
     if (show) {
         printf("h' in scratch (chip) vs golden, first 16 of %d:\n  chip  :", mdl.H);
-        for (int j = 0; j < 16; j++) printf(" %4d", (int8_t)psram_peek(0x7FFF00 + j));
+        for (int j = 0; j < 16; j++) printf(" %4d", (int8_t)mem_peek(MEM_RAMB, MEM_SCRATCH + j));
         printf("\n  golden:");
         for (int j = 0; j < 16; j++) printf(" %4d", (int)g.h[j]);
         printf("\n  %d of %d h' bytes differ; golden logits:", hb, mdl.H);
@@ -315,8 +357,8 @@ static int hprime_diff(bool show) {
 
 /* one diagnostic frame (clip 0 frame 0) with the model at 'base', div 7 / rd_dly 3; returns 1 if bit-exact */
 static int diag_frame(uint32_t base, uint8_t r[3], uint8_t *st) {
-    psram_load(base, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
-    for (int j = 0; j < 48; j++) { uint8_t z = 0; psram_load(0x7FFF00 + j, &z, 1); }
+    model_install(base);
+    for (int j = 0; j < 48; j++) { uint8_t z = 0; mem_load(MEM_RAMB, MEM_SCRATCH + j, &z, 1); }
     chip_reset();
     chip_config(7, 3);
     uint8_t b[3] = {(uint8_t)base, (uint8_t)(base >> 8), (uint8_t)(base >> 16)};
@@ -350,10 +392,10 @@ static int diag(void) {
     printf("---- QSPI wiring diagnostic [%s] ----\n", FW_TAG);
     chip_reset();                                                  /* RUN = 0: the chip releases uio */
     sleep_ms(2);
-    int cs2 = gpio_get(PSRAM_PIN_CS), cs1 = gpio_get(PIN_CS1_MON), sck = gpio_get(PSRAM_PIN_SCK);
-    printf("bus released: CS2 (GP15) = %d, CS1 (GP8) = %d (both expect 1, pull-ups), SCK (GP14) = %d (expect 0)\n",
-           cs2, cs1, sck);
-    if (!cs2 || !cs1) { printf("  -> a CS line is held low: check that wire and its PMOD2 pin\n"); bad++; }
+    int cs0 = gpio_get(PSRAM_PIN_CS0), cs1 = gpio_get(PSRAM_PIN_CS1), cs2 = gpio_get(PSRAM_PIN_CS2), sck = gpio_get(PSRAM_PIN_SCK);
+    printf("bus released: CS0 (GP7) = %d, CS1 (GP8) = %d, CS2 (GP9) = %d (all expect 1, pull-ups), SCK (GP14) = %d (expect 0)\n",
+           cs0, cs1, cs2, sck);
+    if (!cs0 || !cs1 || !cs2) { printf("  -> a CS line is held low: check that wire and its PMOD2 pin\n"); bad++; }
     /* drive test: with the chip in reset the FPGA releases uio, so the Pico must be able to drive SD0..3 */
     {
         int dbad = 0;
@@ -370,7 +412,7 @@ static int diag(void) {
         printf("%s\n", dbad ? "  -> a line is held by something else (FPGA still driving? short?)" : "");
         bad += dbad;
     }
-    psram_load(base, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
+    model_install(base);
     chip_config(7, 3);                                             /* slowest SCK: 1.17 MHz */
     uint8_t b[3] = {(uint8_t)base, (uint8_t)(base >> 8), (uint8_t)(base >> 16)};
     chip_wr(R_BASE0, b, 3);
@@ -391,8 +433,9 @@ static int diag(void) {
     {
         uint32_t last = 0xFFFF, t0 = time_us_32();
         while (time_us_32() - t0 < 3000 && ntr < (int)(sizeof tr / sizeof tr[0])) {
+            uint32_t g = sio_hw->gpio_in;
             uint32_t v = (pio0->sm[0].addr & 31) | ((pio0->sm[1].addr & 31) << 5) |
-                         (((sio_hw->gpio_in >> PSRAM_PIN_SCK) & 3) << 10);
+                         (((g >> PSRAM_PIN_SCK) & 1) << 10) | ((uint32_t)(((g >> PSRAM_PIN_CS0) & 7) == 7) << 11);
             if (v != last) { tr[ntr++] = (uint16_t)v; last = v; }
         }
     }
@@ -406,13 +449,16 @@ static int diag(void) {
     for (uint32_t i = 0; i < n && i < 8; i++) printf(" %08lx", (unsigned long)psram_trace[i]);
     printf("\n");
     if (n == 0) {
-        printf("  -> no transaction decoded: check CS2 (PMOD2 pin 9 -> GP15), SCK (pin 4 -> GP14), SD0 (pin 2 -> GP10)\n");
+        printf("  -> no transaction decoded: check the model CS (CS0 PMOD2 pin 1 -> GP7, CS1 pin 10 -> GP8, CS2 pin 9 -> GP9),"
+               " SCK (pin 4 -> GP14), SD0 (pin 2 -> GP10)\n");
         return bad + 1;
     }
     uint32_t w = psram_trace[0], cmd = w >> 24, addr = w & 0xFFFFFF;
-    printf("first: cmd 0x%02lx (expect 0xeb), addr 0x%06lx (expect 0x%06lx)\n", (unsigned long)cmd,
-           (unsigned long)addr, (unsigned long)base);
+    int dev0 = psram_trace_dev[0];
+    printf("first: cmd 0x%02lx (expect 0xeb), addr 0x%06lx (expect 0x%06lx), on %s (expect %s)\n", (unsigned long)cmd,
+           (unsigned long)addr, (unsigned long)base, dev0 < MEM_N ? mem_name[dev0] : "no / several CS low", mem_name[model_cs]);
     if (cmd != 0xEB) { printf("  -> command wrong: SD0 or SCK wiring / noise\n"); bad++; }
+    if (dev0 != model_cs) { printf("  -> chip select wrong: check the CS wires (CS0 PMOD2 pin 1 -> GP7, CS1 pin 10 -> GP8, CS2 pin 9 -> GP9)\n"); bad++; }
     if (addr >> 16) { printf("  -> address bits 23:16 not zero: an SD line is floating or picking up noise\n"); bad++; }
     for (int k = 0; k < 4; k++) {                                  /* nibble k carries 1 << k on the FPGA side */
         int got = (addr >> (12 - 4 * k)) & 0xF;
@@ -436,8 +482,9 @@ static int diag(void) {
         printf("Pico SMs after the frame: rx pc %u, tx pc %u (start %u), tx FIFO %u words, rx FIFO %u, FDEBUG 0x%08lx\n",
                rxpc, txpc, psram_tx_start_pc(), txl, rxl, (unsigned long)fd);
         {   /* program-counter trace, relative to each program (see qspi_psram.pio.h for the listing):
-             * qspi_tx: 0 mov osr | 1 wait CS low | 2 set x,19 | 3-5 edge-count loop | 6 pull | 7 set y |
-             *          8 wait SCK low | 9 out | 10 wait SCK high | 11 jmp y-- | 12 jmp to pull.   qspi_rx: 1 wait CS low | 3-6 cmd | 8-11 addr | 13 parked */
+             * qspi_tx: 0 set pindirs 0 | 1 set x,3 | 2 wait IRQ 5 | 3-5 edges 17-20 | 6 pull | 7 set y |
+             *          8 wait SCK low | 9 out | 10 set pindirs 15 | 11 wait SCK high | 12 jmp y--.
+             * qspi_rx: 2 wait IRQ 4 (CS fall) | 3 jmp first | 4-7 16-nibble loop | 8 irq 5 | 9 parked */
             unsigned orx = psram_off_rx(), otx = psram_off_tx();
             for (int i = 0; i < ntr; i++)
                 tr[i] = (uint16_t)((((tr[i] & 31) - orx) & 31) | (((((tr[i] >> 5) & 31) - otx) & 31) << 5) | (tr[i] & 0xC00));
@@ -460,19 +507,19 @@ static int diag(void) {
             for (int i = 1; i < ntr; i++) { int c = (tr[i] >> 10) & 1; if (c && !prev) sck_rise++; prev = c; }
             printf("\n  SCK rising edges seen by the trace: %d\n", sck_rise);
         }
-        printf("CS2 rising edges seen (raw, glitches included): %u%s for %lu transactions%s\n", raw, raw >= 8 ? "+" : "",
+        printf("CS rises (all three high again, raw, glitches included): %u%s for %lu transactions%s\n", raw, raw >= 8 ? "+" : "",
                (unsigned long)(psram_stats.reads + psram_stats.writes),
-               raw > psram_stats.reads + psram_stats.writes ? "  -> CS GLITCHES on the CS2 wire (filtered from this build on)" : "");
-        printf("bus at each SCK rising edge (%d edges captured; SD3..0 hex, '-' = CS high):\n  ", ns);
+               raw > psram_stats.reads + psram_stats.writes ? "  -> CS GLITCHES (filtered by the watchers)" : "");
+        printf("bus at each SCK rising edge (%d edges captured; SD3..0 hex, '-' = all CS high):\n  ", ns);
         for (int i = 0; i < ns && i < 96; i++) {
-            printf("%c", (sm[i] & 0x20) ? '-' : "0123456789abcdef"[sm[i] & 15]);
+            printf("%c", SNIFF_CS(sm[i]) == 7 ? '-' : "0123456789abcdef"[SNIFF_SD(sm[i])]);
             if (i == 7 || i == 13 || i == 15 || i == 19) printf(" | ");
         }
         printf("\n  (edges 1-8 command on SD0, 9-14 address, 15-16 mode, 17-20 dummy, 21+ data)\n");
         printf("  data on the bus:");
         int nb = 0, dok = 0;
         for (int i = 20; i + 1 < ns && nb < 16; i += 2, nb++) {     /* (first burst only, full check below) */
-            uint8_t v = (uint8_t)(((sm[i] & 15) << 4) | (sm[i + 1] & 15));
+            uint8_t v = (uint8_t)((SNIFF_SD(sm[i]) << 4) | SNIFF_SD(sm[i + 1]));
             uint8_t e = KWS_MODEL_BLOB[nb];
             printf(" %02x", v);
             dok += v == e;
@@ -513,14 +560,14 @@ static int diag(void) {
     {   /* did any chip write land in the model area (corrupting weights)? */
         int mb = 0, first = -1;
         for (int i = 0; i < KWS_MODEL_BYTES; i++)
-            if (psram_peek(base + i) != KWS_MODEL_BLOB[i]) { if (first < 0) first = i; mb++; }
+            if (mem_peek(model_cs, base + i) != KWS_MODEL_BLOB[i]) { if (first < 0) first = i; mb++; }
         printf("model in Pico memory after the frame: %d of %d bytes changed%s", mb, KWS_MODEL_BYTES, mb ? "" : " (intact)");
         if (mb) printf(", first at model offset %d (0x%06x)", first, (unsigned)(base + first));
         printf(" | writes: %lu total, %lu into the model area (last at 0x%06lx)\n",
                (unsigned long)psram_stats.writes, (unsigned long)psram_stats.writes_model_area,
                (unsigned long)psram_stats.last_bad_waddr);
         printf("scratch 0x7FFF00..2F (all 48 h' bytes the chip wrote):\n ");
-        for (int j = 0; j < 48; j++) { printf(" %4d", (int8_t)psram_peek(0x7FFF00 + j)); if (j % 16 == 15) printf("\n "); }
+        for (int j = 0; j < 48; j++) { printf(" %4d", (int8_t)mem_peek(MEM_RAMB, MEM_SCRATCH + j)); if (j % 16 == 15) printf("\n "); }
         printf("\n");
     }
     printf("RESULT: top1 %d (%s) %d/%d, expected top1 %d (%s) %d/%d\n", r[0] >> 4, KWS_CLASS_NAMES[r[0] >> 4],
@@ -536,7 +583,7 @@ static int diag(void) {
     }
     hprime_diff(true);
     /* the copy at 0x001248 overlapped the model at 0: restore it for the other tests */
-    psram_load(0, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
+    model_install(0);
     printf("frame at SCK 1.17 MHz: %s, result %s, STATUS 0x%02x%s | PSRAM %lu reads %lu writes, out of range %lu\n",
            fr ? "done" : "TIMEOUT", res_ok ? "bit-exact" : "WRONG", st, st & S_MODEL_ERR ? " MODEL_ERR" : "",
            (unsigned long)psram_stats.reads, (unsigned long)psram_stats.writes, (unsigned long)psram_stats.out_of_range);
@@ -557,7 +604,27 @@ static int diag(void) {
             if (pass == 1) res_ok = ok;                    /* the verdict below is for the hold-off on (the fix) */
         }
         holdoff_on = saved;
-        psram_load(0, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
+    }
+    {   /* chip-select wiring: one frame with the model in each memory - its CS must carry the stream */
+        int saved = model_cs;
+        printf("chip selects (one frame each, model at 0x%06lx):\n", (unsigned long)base);
+        static const char *const csname[MEM_N] = {"CS0 (uio0, FPGA 46, PMOD2 pin 1)  -> GP7",
+                                                 "CS1 (uio6, FPGA 38, PMOD2 pin 10) -> GP8",
+                                                 "CS2 (uio7, FPGA 36, PMOD2 pin 9)  -> GP9"};
+        for (int d = 0; d < MEM_N; d++) {
+            model_cs = d;
+            uint8_t rr[3], st2;
+            int ok = diag_frame(base, rr, &st2);
+            int stray = 0;
+            for (int e = 0; e < MEM_N; e++) if (e != d && e != MEM_RAMB) stray += (int)psram_stats.rd_dev[e];
+            bool line_ok = ok && psram_stats.rd_dev[d] && !stray && !psram_stats.cs_bad && !psram_stats.wr_not_ramb;
+            printf("  %s: %s, reads CS0/CS1/CS2 %lu/%lu/%lu, writes %lu, frame %s\n", csname[d], line_ok ? "ok" : "FAIL",
+                   (unsigned long)psram_stats.rd_dev[0], (unsigned long)psram_stats.rd_dev[1], (unsigned long)psram_stats.rd_dev[2],
+                   (unsigned long)psram_stats.writes, ok ? "bit-exact" : "WRONG");
+            if (!line_ok) bad++;
+        }
+        model_cs = saved;
+        model_install(0);
     }
     if (!bad && !res_ok)
         printf("  -> wiring and bus data are right but the result differs: run '3' (shows the first mismatching frames)\n");
@@ -568,14 +635,15 @@ static int diag(void) {
 /* ---------------------------------------------------------------- F5: live microphone */
 static void live_start(void) {
     const memcfg_preset_t *p = &PRESETS[preset];
-    psram_load(0, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
+    model_install(0);
     chip_reset();
     chip_config(p->div, p->rd);
     psram_stats_clear();
     chip_wr1(R_CTRL, C_RUN | C_HOP512 | C_CLEAR | (cfg_edge ? C_PDM_EDGE : 0));
     live = true;
-    printf("live: PDM_DIV %d (PDM_CLK %.4f MHz, fs %.1f Hz), %s, THR %d N %d - speak to the mic on the FPGA\n",
-           cfg_pdmdiv, 16.3125 / (2.0 * (cfg_pdmdiv + 1)), 16.3125e6 / (128.0 * (cfg_pdmdiv + 1)), p->name, cfg_thr, cfg_n);
+    printf("live: PDM_DIV %d (PDM_CLK %.4f MHz, fs %.1f Hz), %s, model in %s, THR %d N %d - speak to the mic on the FPGA\n",
+           cfg_pdmdiv, 16.3125 / (2.0 * (cfg_pdmdiv + 1)), 16.3125e6 / (128.0 * (cfg_pdmdiv + 1)), p->name, mem_name[model_cs],
+           cfg_thr, cfg_n);
 }
 
 static void live_poll(void) {
@@ -598,16 +666,18 @@ static void live_poll(void) {
 static void help(void) {
     printf("\ncommands:\n"
            "  1  F1 registers (ID, H, defaults, auto-increment)\n"
-           "  3  F3 host features -> NN, all %d golden clips, model streamed from the Pico PSRAM\n"
+           "  3  F3 host features -> NN, all %d golden clips, model streamed from the emulated Pmod\n"
+           "  a  F3 with the model in flash, PSRAM A and PSRAM B in turn\n"
+           "  c  model memory (now %s)\n"
            "  4  F4 host PCM -> front end -> NN, %d golden clips at 16 kHz (~%d s)\n"
            "  w  QSPI read-window sweep (SCK div 7/4/2/1, rd_dly 0..7)\n"
            "  d  QSPI wiring diagnostic (which FPGA SD line reaches which Pico pin)\n"
            "  l  live microphone on/off        v  per-frame output on/off\n"
            "  m  QSPI preset (now: %s)\n"
-           "  b  burst 8/16/32 B (now %d B)    e  PDM edge (now %s)\n"
+           "  b  burst 8/16/32/64/128 B (now %d B; PSRAM max 32 B)    e  PDM edge (now %s)\n"
            "  + / -  THR (%d)    ] / [  N (%d)    s  status + PSRAM counters    z  zero counters\n"
            "  g  SCK hold-off on/off (now %s)  r  reset chip      h  help\n",
-           M1_CLIPS, M2_CLIPS, M2_CLIPS + 1, PRESETS[preset].name, 4 << cfg_burst, cfg_edge ? "falling" : "rising", cfg_thr,
+           M1_CLIPS, mem_name[model_cs], M2_CLIPS, M2_CLIPS + 1, PRESETS[preset].name, 4 << cfg_burst, cfg_edge ? "falling" : "rising", cfg_thr,
            cfg_n, holdoff_on ? "on" : "off - r12 behaviour");
 }
 
@@ -617,13 +687,16 @@ static void command(int ch) {
     switch (ch) {
     case '1': test_regs(); break;
     case '3': test_feat(M1_CLIPS, PRESETS[preset].div, PRESETS[preset].rd, false); break;
+    case 'a': test_all_cs(M1_CLIPS); break;
+    case 'c': model_cs = (model_cs + 1) % MEM_N; model_install(0); printf("model in %s (MEMCFG.cs = %d)\n", mem_name[model_cs], model_cs); break;
     case '4': test_pcm(M2_CLIPS); break;
     case 'w': sweep(); break;
     case 'd': diag(); break;
     case 'l': if (!was_live) live_start(); else { chip_wr1(R_CTRL, 0); printf("live off\n"); } return;
     case 'v': verbose = !verbose; break;
     case 'm': preset = (preset + 1) % 2; printf("QSPI: %s\n", PRESETS[preset].name); break;
-    case 'b': cfg_burst = cfg_burst == 3 ? 1 : cfg_burst + 1; printf("burst %d B\n", 4 << cfg_burst); break;
+    case 'b': cfg_burst = cfg_burst == 5 ? 1 : cfg_burst + 1;
+              printf("burst %d B%s\n", 4 << cfg_burst, cfg_burst > 3 ? " (flash only - the chip caps PSRAM bursts at 32 B)" : ""); break;
     case 'e': cfg_edge = !cfg_edge; printf("PDM edge %s\n", cfg_edge ? "falling" : "rising"); break;
     case '+': if (cfg_thr < 255) cfg_thr++; printf("THR %d\n", cfg_thr); break;
     case '-': if (cfg_thr > 0) cfg_thr--; printf("THR %d\n", cfg_thr); break;
@@ -653,14 +726,15 @@ int main(void) {
     if (SYS_KHZ != 150000) set_sys_clock_khz(SYS_KHZ, true);
     stdio_init_all();
     wifi_ok = cyw43_arch_init() == 0;
-    psram_load(0, KWS_MODEL_BLOB, KWS_MODEL_BYTES);
+    model_install(0);
     psram_start();
     chip_init();
     for (int i = 0; i < 40 && !stdio_usb_connected(); i++) { led((i / 5) % 2 == 0 && i < 30); sleep_ms(100); }
     led(false);
     printf("\n=== kws_fpga_host: tiny_kws rev B on iCESugar + Pico 2 W PSRAM (sys %lu MHz) ===\n=== build %s ===\n",
            (unsigned long)(clock_get_hz(clk_sys) / 1000000), FW_TAG);
-    printf("PSRAM B emulated on GP10-15 (model %d B at 0x000000, md5 %s; h' scratch 0x7FFF00); host SPI0 %d kHz\n",
+    printf("TT QSPI Pmod emulated: flash CS0 GP7, PSRAM A CS1 GP8, PSRAM B CS2 GP9, SD0-3 GP10-13, SCK GP14"
+           " (model %d B at 0x000000 of the selected memory, md5 %s; h' scratch PSRAM B 0x7FFF00); host SPI0 %d kHz\n",
            KWS_MODEL_BYTES, KWS_MODEL_MD5, SPI_HZ / 1000);
     {   /* the FPGA may still be loading its bitstream (both boards powered together): wait for the chip ID */
         int i = 0;
@@ -668,7 +742,7 @@ int main(void) {
         if (i == 50) printf("  no chip ID after 5 s: FPGA not programmed / not powered, or host SPI wiring (PMOD3)\n");
     }
     int e = test_regs();
-    if (!e) e += test_feat(M1_CLIPS, PRESETS[preset].div, PRESETS[preset].rd, false);
+    if (!e) e += test_all_cs(M1_CLIPS);
     if (e) { printf("F3 failed - running the QSPI wiring diagnostic:\n"); diag(); }
     help();
     while (true) {

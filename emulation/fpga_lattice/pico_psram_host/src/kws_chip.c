@@ -19,7 +19,6 @@ void chip_init(void) {
     gpio_init(PIN_CHIP_RSTN); gpio_put(PIN_CHIP_RSTN, 1); gpio_set_dir(PIN_CHIP_RSTN, GPIO_OUT);
     gpio_init(PIN_DETECT);   gpio_set_dir(PIN_DETECT, GPIO_IN);  gpio_pull_down(PIN_DETECT);
     gpio_init(PIN_FRAME);    gpio_set_dir(PIN_FRAME, GPIO_IN);   gpio_pull_down(PIN_FRAME);
-    gpio_init(PIN_CS1_MON);  gpio_set_dir(PIN_CS1_MON, GPIO_IN); gpio_pull_up(PIN_CS1_MON);
 }
 
 void chip_reset(void) {

@@ -14,43 +14,76 @@
 #define __pio_const const
 #endif
 
+// ---------- //
+// qspi_csdet //
+// ---------- //
+
+#define qspi_csdet_wrap_target 2
+#define qspi_csdet_wrap 3
+#define qspi_csdet_pio_version 1
+
+#define qspi_csdet_offset_start 0u
+
+static __pio_const uint16_t qspi_csdet_program_instructions[] = {
+    0xa020, //  0: mov    x, pins
+    0x00a0, //  1: jmp    x != y, 0
+            //     .wrap_target
+    0xa020, //  2: mov    x, pins
+    0x00a4, //  3: jmp    x != y, 4
+            //     .wrap
+    0xc004, //  4: irq    nowait 4
+    0x0000, //  5: jmp    0
+};
+
+#if !PICO_NO_HARDWARE
+static __pio_const struct pio_program qspi_csdet_program = {
+    .instructions = qspi_csdet_program_instructions,
+    .length = 6,
+    .origin = -1,
+    .pio_version = qspi_csdet_pio_version,
+#if PICO_PIO_VERSION > 0
+    .used_gpio_ranges = 0x0
+#endif
+};
+
+static inline pio_sm_config qspi_csdet_program_get_default_config(uint offset) {
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_wrap(&c, offset + qspi_csdet_wrap_target, offset + qspi_csdet_wrap);
+    return c;
+}
+#endif
+
 // ------- //
 // qspi_rx //
 // ------- //
 
 #define qspi_rx_wrap_target 0
-#define qspi_rx_wrap 13
+#define qspi_rx_wrap 9
 #define qspi_rx_pio_version 1
 
 #define qspi_rx_offset_start 0u
-#define qspi_rx_offset_h_r0 3u
-#define qspi_rx_offset_h_r1 5u
-#define qspi_rx_offset_h_r2 8u
-#define qspi_rx_offset_h_r3 10u
+#define qspi_rx_offset_h_r0 4u
+#define qspi_rx_offset_h_r1 6u
 
 static __pio_const uint16_t qspi_rx_program_instructions[] = {
             //     .wrap_target
     0xa0c3, //  0: mov    isr, null
-    0x2025, //  1: wait   0 pin, 5
-    0xe027, //  2: set    x, 7
-    0x2024, //  3: wait   0 pin, 4
-    0x20a4, //  4: wait   1 pin, 4
-    0x4001, //  5: in     pins, 1
-    0x0043, //  6: jmp    x--, 3
-    0xe027, //  7: set    x, 7
-    0x2024, //  8: wait   0 pin, 4
-    0x20a4, //  9: wait   1 pin, 4
-    0x4004, // 10: in     pins, 4
-    0x0048, // 11: jmp    x--, 8
-    0x8020, // 12: push   block
-    0x20c7, // 13: wait   1 irq, 7
+    0xe02f, //  1: set    x, 15
+    0x20c4, //  2: wait   1 irq, 4
+    0x0005, //  3: jmp    5
+    0x2024, //  4: wait   0 pin, 4
+    0x20a4, //  5: wait   1 pin, 4
+    0x4004, //  6: in     pins, 4
+    0x0044, //  7: jmp    x--, 4
+    0xc005, //  8: irq    nowait 5
+    0x20c7, //  9: wait   1 irq, 7
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static __pio_const struct pio_program qspi_rx_program = {
     .instructions = qspi_rx_program_instructions,
-    .length = 14,
+    .length = 10,
     .origin = -1,
     .pio_version = qspi_rx_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -69,40 +102,38 @@ static inline pio_sm_config qspi_rx_program_get_default_config(uint offset) {
 // qspi_tx //
 // ------- //
 
-#define qspi_tx_wrap_target 0
-#define qspi_tx_wrap 14
+#define qspi_tx_wrap_target 6
+#define qspi_tx_wrap 12
 #define qspi_tx_pio_version 1
 
 #define qspi_tx_offset_start 0u
-#define qspi_tx_offset_h_t0 4u
-#define qspi_tx_offset_h_t1 5u
-#define qspi_tx_offset_h_t2 11u
-#define qspi_tx_offset_h_t3 12u
+#define qspi_tx_offset_h_t0 3u
+#define qspi_tx_offset_h_t1 4u
+#define qspi_tx_offset_h_t2 10u
+#define qspi_tx_offset_h_t3 11u
 
 static __pio_const uint16_t qspi_tx_program_instructions[] = {
+    0xe080, //  0: set    pindirs, 0
+    0xe023, //  1: set    x, 3
+    0x20c5, //  2: wait   1 irq, 5
+    0x2024, //  3: wait   0 pin, 4
+    0x20a4, //  4: wait   1 pin, 4
+    0x0043, //  5: jmp    x--, 3
             //     .wrap_target
-    0xa0e3, //  0: mov    osr, null
-    0xe080, //  1: set    pindirs, 0
-    0x2025, //  2: wait   0 pin, 5
-    0xe033, //  3: set    x, 19
-    0x2024, //  4: wait   0 pin, 4
-    0x20a4, //  5: wait   1 pin, 4
-    0x0044, //  6: jmp    x--, 4
-    0x80a0, //  7: pull   block
-    0xe047, //  8: set    y, 7
-    0x2024, //  9: wait   0 pin, 4
-    0x6004, // 10: out    pins, 4
-    0xe08f, // 11: set    pindirs, 15
-    0x20a4, // 12: wait   1 pin, 4
-    0x0089, // 13: jmp    y--, 9
-    0x0007, // 14: jmp    7
+    0x80a0, //  6: pull   block
+    0xe047, //  7: set    y, 7
+    0x2024, //  8: wait   0 pin, 4
+    0x6004, //  9: out    pins, 4
+    0xe08f, // 10: set    pindirs, 15
+    0x20a4, // 11: wait   1 pin, 4
+    0x0088, // 12: jmp    y--, 8
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static __pio_const struct pio_program qspi_tx_program = {
     .instructions = qspi_tx_program_instructions,
-    .length = 15,
+    .length = 13,
     .origin = -1,
     .pio_version = qspi_tx_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -122,26 +153,31 @@ static inline pio_sm_config qspi_tx_program_get_default_config(uint offset) {
 // ------- //
 
 #define qspi_cs_wrap_target 0
-#define qspi_cs_wrap 7
+#define qspi_cs_wrap 12
 #define qspi_cs_pio_version 1
 
 static __pio_const uint16_t qspi_cs_program_instructions[] = {
             //     .wrap_target
-    0x2025, //  0: wait   0 pin, 5
-    0x20a5, //  1: wait   1 pin, 5
-    0xe047, //  2: set    y, 7
-    0x00c5, //  3: jmp    pin, 5
-    0x0000, //  4: jmp    0
-    0x0083, //  5: jmp    y--, 3
-    0xa0c1, //  6: mov    isr, x
-    0x8000, //  7: push   noblock
+    0xa020, //  0: mov    x, pins
+    0x00a3, //  1: jmp    x != y, 3
+    0x0000, //  2: jmp    0
+    0xa020, //  3: mov    x, pins
+    0x00a3, //  4: jmp    x != y, 3
+    0xa442, //  5: nop                           [4]
+    0xa020, //  6: mov    x, pins
+    0x00a3, //  7: jmp    x != y, 3
+    0xa442, //  8: nop                           [4]
+    0xa020, //  9: mov    x, pins
+    0x00a3, // 10: jmp    x != y, 3
+    0xa0c7, // 11: mov    isr, osr
+    0x8000, // 12: push   noblock
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static __pio_const struct pio_program qspi_cs_program = {
     .instructions = qspi_cs_program_instructions,
-    .length = 8,
+    .length = 13,
     .origin = -1,
     .pio_version = qspi_cs_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -161,21 +197,24 @@ static inline pio_sm_config qspi_cs_program_get_default_config(uint offset) {
 // ---------- //
 
 #define qspi_csraw_wrap_target 0
-#define qspi_csraw_wrap 2
+#define qspi_csraw_wrap 5
 #define qspi_csraw_pio_version 1
 
 static __pio_const uint16_t qspi_csraw_program_instructions[] = {
             //     .wrap_target
-    0x2025, //  0: wait   0 pin, 5
-    0x20a5, //  1: wait   1 pin, 5
-    0x8000, //  2: push   noblock
+    0xa020, //  0: mov    x, pins
+    0x00a3, //  1: jmp    x != y, 3
+    0x0000, //  2: jmp    0
+    0xa020, //  3: mov    x, pins
+    0x00a3, //  4: jmp    x != y, 3
+    0x8000, //  5: push   noblock
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static __pio_const struct pio_program qspi_csraw_program = {
     .instructions = qspi_csraw_program_instructions,
-    .length = 3,
+    .length = 6,
     .origin = -1,
     .pio_version = qspi_csraw_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -194,23 +233,22 @@ static inline pio_sm_config qspi_csraw_program_get_default_config(uint offset) {
 // qspi_sniff //
 // ---------- //
 
-#define qspi_sniff_wrap_target 1
-#define qspi_sniff_wrap 3
+#define qspi_sniff_wrap_target 0
+#define qspi_sniff_wrap 2
 #define qspi_sniff_pio_version 1
 
 static __pio_const uint16_t qspi_sniff_program_instructions[] = {
-    0x2025, //  0: wait   0 pin, 5
             //     .wrap_target
-    0x20a4, //  1: wait   1 pin, 4
-    0x4008, //  2: in     pins, 8
-    0x2024, //  3: wait   0 pin, 4
+    0x20a7, //  0: wait   1 pin, 7
+    0x4008, //  1: in     pins, 8
+    0x2027, //  2: wait   0 pin, 7
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static __pio_const struct pio_program qspi_sniff_program = {
     .instructions = qspi_sniff_program_instructions,
-    .length = 4,
+    .length = 3,
     .origin = -1,
     .pio_version = qspi_sniff_pio_version,
 #if PICO_PIO_VERSION > 0

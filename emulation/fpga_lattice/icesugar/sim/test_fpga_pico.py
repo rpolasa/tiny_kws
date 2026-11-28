@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Co-simulation: FPGA build (top_icesugar + unchanged tiny_kws RTL) <-> Pico 2 W PSRAM emulator.
+"""Co-simulation: FPGA build (top_icesugar + unchanged tiny_kws RTL) <-> Pico 2 W QSPI Pmod emulator.
 
 The Pico is pio_model.PicoPsram executing the pioasm opcodes of pico_psram_host/src/qspi_psram.pio
-at 150 MHz with a 2-cycle input synchroniser, DMA re-arm latency and core-1 latency.
-The chip runs in FEAT_HOST mode (host features over SPI, model streamed from the emulated PSRAM B
-on CS2, h' written to and read back from 0x7FFF00) and every frame is compared with the golden model.
+at 150 MHz with a 2-cycle input synchroniser, DMA re-arm latency and core-1 latency.  It emulates the
+Tiny Tapeout QSPI Pmod: flash on CS0, PSRAM A on CS1, PSRAM B on CS2 (r15).
+The chip runs in FEAT_HOST mode (host features over SPI, model streamed from the memory selected by
+MEMCFG.cs - the other two hold no model - h' written to and read back from PSRAM B 0x7FFF00) and every
+frame is compared with the golden model.
 
     make -f cocotb.mk  (needs iverilog, cocotb 2.x, numpy, scipy, gcc; KWS_REPO = tiny_kws repo)
 Environment: PICO_MHZ (150), KWS_FRAMES (3), KWS_CASES ("2:1,1:0" = div:rd_dly list),
+             KWS_CS ("0,1,2" = model memories to run each case with), KWS_BURST (3; 5 = 128 B flash bursts),
              PICO_HOLDOFF (auto = 7*div-3 as the firmware, or a number; 0 = r12 PIO behaviour),
              PICO_SCK_GLITCH=bits:w:d (SCK crosstalk spikes, see pico_run), PICO_CS_GLITCH,
              PICO_DMA_LAT / PICO_CORE_LAT / PICO_WORD_COST (sys cycles: 8 / 12 / 10),
@@ -81,24 +84,25 @@ async def pico_run(dut, pico, period_ps):
     sg_bits, sg_w, sg_d = (int(v) for v in sg.split(":")) if sg else (0, 0, 0)
     pend, forced_until, ncyc, prev_val = [], -1, 0, 0
     pico.sck_glitches = 0
-    since_fall, cs_prev = 0, 1
+    since_fall, cs_prev = 0, 7
     pico.glitches = 0
     while True:
-        if pico.idle() and _bits(dut.p_cs.value) == 1:
-            await FallingEdge(dut.p_cs)
+        if pico.idle() and _bits(dut.p_csall.value) == 1:
+            await FallingEdge(dut.p_csall)
         await Timer(period_ps, unit="ps")
-        sd, sck, cs = _bits(dut.p_sd.value), _bits(dut.p_sck.value), _bits(dut.p_cs.value)
+        sd, sck = _bits(dut.p_sd.value), _bits(dut.p_sck.value)
+        cs = _bits(dut.p_cs0.value) | (_bits(dut.p_cs1.value) << 1) | (_bits(dut.p_cs2.value) << 2)
         if glitch_at:
-            since_fall = since_fall + 1 if (cs == 0 and cs_prev == 0) else 0
+            since_fall = since_fall + 1 if (cs != 7 and cs_prev != 7) else 0
             cs_prev = cs
-            if cs == 0 and glitch_at <= since_fall < glitch_at + 5:
-                cs = 1
+            if cs != 7 and glitch_at <= since_fall < glitch_at + 5:
+                cs = 7                                          # the active CS spikes high
                 if since_fall == glitch_at: pico.glitches += 1
         ncyc += 1
         if sg:
             while pend and pend[0][0] <= ncyc: forced_until = max(forced_until, pend.pop(0)[1])
-            if ncyc < forced_until and cs == 0 and sck == 0: sck = 1
-        val, oe = pico.step((sd << 10) | (sck << 14) | (cs << 15))
+            if ncyc < forced_until and cs != 7 and sck == 0: sck = 1
+        val, oe = pico.step((cs << 7) | (sd << 10) | (sck << 14))
         if sg and oe and val != prev_val:
             if bin((val & ~prev_val) & oe & 15).count("1") >= sg_bits:
                 pend.append((ncyc + sg_d, ncyc + sg_d + sg_w)); pico.sck_glitches += 1
@@ -132,12 +136,14 @@ async def test_feat_host_pico_psram(dut):
     host = Host(dut)
     results = []
     # one Pico for the whole run, as on the bench (the chip is reset between settings)
-    pico = PicoPsram(hdr, blob, burst=3, dma_lat=int(os.environ.get("PICO_DMA_LAT", "8")),
+    burst = int(os.environ.get("KWS_BURST", "3"))
+    pico = PicoPsram(hdr, burst=burst, dma_lat=int(os.environ.get("PICO_DMA_LAT", "8")),
                      core_lat=int(os.environ.get("PICO_CORE_LAT", "12")),
                      word_cost=int(os.environ.get("PICO_WORD_COST", "10")))
     cocotb.start_soon(pico_run(dut, pico, int(round(1e6 / pico_mhz))))
     expect_pass = os.environ.get("KWS_EXPECT", "pass") == "pass"
-    for div, rd in cases:
+    css = [int(v) for v in os.environ.get("KWS_CS", "0,1,2").split(",")]
+    for div, rd, mcs in [(d, r, c) for (d, r) in cases for c in css]:
         for k in pico.stats: pico.stats[k] = 0
         # SCK hold-off as the firmware sets it (psram_holdoff_for_div at 150 MHz), PICO_HOLDOFF overrides
         ho = os.environ.get("PICO_HOLDOFF", "auto")
@@ -148,12 +154,12 @@ async def test_feat_host_pico_psram(dut):
         dut.host_rst_n.value = 1
         await ClockCycles(dut.clk, 200)                     # POR (SIM: 64 clk) + chip clear sequences
         assert await host.rd(ID) == 0x4B
-        memcfg = (rd << 5) | (div << 2) | 2                  # model + scratch in PSRAM B (CS2)
+        memcfg = (rd << 5) | (div << 2) | mcs                # model in CS mcs, h' scratch in PSRAM B (CS2)
         await host.wr(MEMCFG, memcfg)
-        await host.wr(BURST, 3)
+        await host.wr(BURST, burst)
         base = int(os.environ.get("KWS_BASE", "0"), 0)
-        if base:
-            pico.mem_lo[base:base + len(blob)] = blob
+        for d in range(3): pico.mem[d][:] = bytes([0xFF if d == 0 else 0x00]) * pico.MEM   # as model_install()
+        pico.load(mcs, base, blob)
         pico.trace = []
         await host.wr(BASE0, base & 255, (base >> 8) & 255, base >> 16)
         await host.wr(THR, thr, (nfill << 4) | n)
@@ -183,14 +189,18 @@ async def test_feat_host_pico_psram(dut):
         dut._log.info("first words at the Pico: " + " ".join(f"{w:08x}" for w in pico.trace))
         if getattr(pico, "glitches", 0): dut._log.info(f"CS glitches injected so far: {pico.glitches}")
         if getattr(pico, "sck_glitches", 0): dut._log.info(f"SCK spikes injected so far: {pico.sck_glitches}")
-        res = dict(div=div, rd=rd, holdoff=pico.holdoff, bad=bad, status=st, contention=cont, us_per_frame=round(dt, 1), **pico.stats)
+        res = dict(cs=mcs, div=div, rd=rd, holdoff=pico.holdoff, bad=bad, status=st, contention=cont, us_per_frame=round(dt, 1), **pico.stats)
         results.append(res)
         dut._log.info(f"MEMCFG 0x{memcfg:02x}: {res}")
+    def cs_ok(r):    # model reads only on its CS (PSRAM B also serves the h' read-back), writes only on CS2
+        stray = sum(r[f"rd_cs{d}"] for d in range(3) if d not in (r["cs"], 2))
+        return stray == 0 and r[f"rd_cs{r['cs']}"] > 0 and r["cs_bad"] == 0 and r["wr_not_cs2"] == 0
     for r in results:
         dut._log.info(("PASS " if (r["bad"] == 0 and r["status"] & 0x0C == 0 and r["contention"] == 0
-                                   and r["late"] == 0 and r["bad_cmd"] == 0) else "FAIL ") + str(r))
+                                   and r["late"] == 0 and r["bad_cmd"] == 0 and cs_ok(r)) else "FAIL ") + str(r))
     if expect_pass:
         for r in results:
             assert r["bad"] == 0 and r["status"] & 0x0C == 0, f"mismatch / chip error: {r}"
             assert r["contention"] == 0, f"QSPI bus contention: {r}"
-            assert r["late"] == 0 and r["bad_cmd"] == 0, f"PSRAM model: {r}"
+            assert r["late"] == 0 and r["bad_cmd"] == 0, f"Pmod model: {r}"
+            assert cs_ok(r), f"chip-select routing: {r}"
